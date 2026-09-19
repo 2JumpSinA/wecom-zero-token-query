@@ -217,5 +217,6 @@ wecom-zero-token-query/
 - [ ] 配置里**没有**写死本机绝对路径（用 `${HERE}` / 环境变量）
 - [ ] `--status` 输出正常（进程 / 连接 / 心跳 / 最近执行），群里发「状态」也能拿到同一份
 - [ ] 连续失败告警已按需开启（`alerts`），并用 `--alert-selftest` 验过状态机
+- [ ] 失败人话提示已按需配置（`authHints`），并用 `--hint-selftest` 验过命中
 - [ ] `python -m unittest discover -s tests` 全绿（改了样板就跑）
 - [ ] 明确告知用户：能力上限 = 放进命令表的只读脚本；secret 不要外发

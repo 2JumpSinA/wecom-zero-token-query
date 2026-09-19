@@ -498,8 +498,38 @@ function buildStatusText(cfg, rt) {
   return lines.join('\n');
 }
 
-/** 主动推一条提醒（告警用）。dryRun 时只写日志，不打扰群。 */
-async function sendAlert(client, cfg, chatId, text) {
+/**
+ * 失败原因里的人话提示。
+ * 为什么需要：脚本失败时最常甩出一段 traceback，同事看不懂；而这类失败里
+ * 绝大多数是「登录态过期」——一句"运行 login.bat 续期"能省掉一整轮沟通。
+ * 配置：commands.json 的 authHints 数组 [{ "match": "<正则>", "hint": "<人话>" }]，
+ * 不配置时用下面的内置默认。
+ */
+const DEFAULT_AUTH_HINTS = [
+  {
+    match: '重新登陆|重新登录|验证错误|未登录|登录态失效|登录态已失效|token[^\\n]{0,12}(过期|失效)|凭据[^\\n]{0,12}(过期|失效)',
+    hint: '看起来是登录态/凭据失效 → 在本机运行 login.bat 重新登录（或注入新的 token）',
+  },
+  { match: '\\b401\\b|Unauthorized', hint: '接口返回 401（未授权）→ 登录态多半已过期，续期后重试' },
+  { match: 'cookie[^\\n]{0,12}(失效|过期)', hint: 'Cookie 已失效 → 运行 login.bat 重新捕获登录态' },
+];
+
+function authHintFor(text, cfg) {
+  // 先看配置里的规则，再退回内置规则 —— 这样"只加一条自己的规则"不会把通用覆盖丢掉
+  const configured = Array.isArray(cfg.authHints) ? cfg.authHints : [];
+  const hay = String(text ?? '');
+  for (const r of [...configured, ...DEFAULT_AUTH_HINTS]) {
+    if (!r || !r.match) continue;
+    try {
+      if (new RegExp(r.match, 'i').test(hay)) return r.hint ?? '';
+    } catch {
+      /* 配置里的正则写错就跳过，不能让提示功能把主流程带崩 */
+    }
+  }
+  return '';
+}
+
+/** 主动推一条提醒（告警用）。dryRun 时只写日志，不打扰群。 */async function sendAlert(client, cfg, chatId, text) {
   if (cfg.alerts?.dryRun === true) {
     log(`[dryRun] 本该推送告警：${text.replace(/\n/g, ' ｜ ')}`);
     return;
@@ -681,7 +711,10 @@ async function serve(cfg, sdk) {
       if (!res.ok || !payload) {
         const tail = (res.err || res.out || '').trim().split('\n').slice(-6).join('\n');
         const detail = tail ? `\n> ${tail.replace(/\n/g, '\n> ')}` : '';
-        await client.replyStream(frame, streamId, `### ❌ ${cmd.label}查询失败\n> 退出码：${res.code}，耗时 ${(res.ms / 1000).toFixed(1)} 秒${detail}`, true);
+        const hint = authHintFor(`${res.err}\n${res.out}`, cfg);
+        if (hint) log(`命中失败提示规则：${hint}`);
+        const hintLine = hint ? `\n> 💡 ${hint}` : '';
+        await client.replyStream(frame, streamId, `### ❌ ${cmd.label}查询失败\n> 退出码：${res.code}，耗时 ${(res.ms / 1000).toFixed(1)} 秒${hintLine}${detail}`, true);
         lastRuns.set(cmd.id, { ts: Date.now(), ok: false, code: res.code, ms: res.ms });
         const dec = noteFailure(cmd.id, cfg.alerts);
         log(`失败计数：${cmd.id} —— ${dec.alert ? '★ 触发告警' : '不告警'}（${dec.reason}）`);
@@ -868,6 +901,21 @@ async function main() {
   }
 
   // 告警状态机自检：喂 N 次失败，打印每次的判定（不联网、不打扰群）
+  if (mode === '--hint-selftest') {
+    const samples = [
+      'RuntimeError: 登录态失效: {code: 401, msg: "请重新登陆"}',
+      'requests.exceptions.HTTPError: 401 Unauthorized',
+      'cookie 已失效，请重新捕获',
+      'ValueError: 找不到配置文件 config.json',
+    ];
+    for (const s of samples) {
+      const hit = authHintFor(s, cfg);
+      console.log(`  ${hit ? '★ 命中' : '  未命中'}  ${s}`);
+      if (hit) console.log(`         → ${hit}`);
+    }
+    return 0;
+  }
+
   if (mode === '--alert-selftest') {
     const id = argv[1] && !argv[1].startsWith('--') ? argv[1] : 'demo';
     const a = cfg.alerts ?? {};
