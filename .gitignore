@@ -1,0 +1,10 @@
+# 不该进版本库/分发包的东西
+logs/
+__pycache__/
+*.pyc
+.session.json
+*.bak
+_versions/
+node_modules/
+# 真实凭据（只在本机存在）
+secret.txt

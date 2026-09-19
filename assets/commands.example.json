@@ -1,0 +1,54 @@
+{
+  "_怎么用": [
+    "复制成本目录下的 commands.json 再改（程序优先读 commands.json，没有才回退到这个示例）。",
+    "真正要改的就四处：botId、allowedUsers、allowedChats+groups、commands。",
+    "Windows 路径在 JSON 里必须写双反斜杠，例如 D:\\\\scripts\\\\query.py",
+    "本文件里的值全是占位符：直接启动只会告诉你配置缺失，不会误连任何真实机器人。"
+  ],
+  "botId": "填企微后台『智能机器人』的 botId，形如 aibXXXXXXXXXXXXXXXXXXXXXXXX",
+  "secretEnv": "WECOM_FASTLANE_SECRET",
+  "secretFile": "secret.txt",
+  "allowedUsers": [],
+  "allowAllUsers": false,
+  "_allowAllUsers说明": "true = 对所有人开放（忽略 allowedUsers）。默认 false：白名单为空就谁都不响应，不会因为忘配而裸奔。",
+  "allowedChats": [],
+  "groups": {
+    "把群ID填这里": { "name": "示例：品牌A数据播报", "scope": ["品牌A隐形眼镜"] },
+    "另一个群ID": { "name": "示例：我的私人群（不裁剪）", "scope": [] }
+  },
+  "_路径变量说明": "cwd/exe/args 里可以用 ${HERE}（通道目录）、${DSH_HOME}、或任意环境变量名如 ${PYTHON_EXE}；这样换台机器不用改配置",
+  "_scope说明": "scope 是任意维度值（品牌/渠道/区域/账号）；群 scope 为空＝该群不裁剪、看到全部。老写法 brands 等价于 scope",
+  "commands": [
+    {
+      "id": "example-balance",
+      "label": "账户余额",
+      "match": ["余额", "查余额"],
+      "generic": [],
+      "chats": [],
+      "scopeByGroup": true,
+      "_说明": "chats 留空数组＝所有群通用；写了群 ID＝只在该群可用。scopeByGroup=true＝发送前按本群 scope 裁剪（见 references/10）",
+      "cwd": "${HERE}\\scripts",
+      "exe": "${PYTHON_EXE}",
+      "args": ["-X", "utf8", "你的脚本.py", "--preview"],
+      "extract": "separator",
+      "dropLines": ["^\\[", "^=== "],
+      "timeoutMs": 180000,
+      "long": true
+    },
+    {
+      "id": "example-brand-a-shops",
+      "label": "A 品牌门店营业情况",
+      "match": ["A品牌门店"],
+      "generic": ["门店", "营业"],
+      "_说明": "generic 是通用别名：只有在本会话里唯一指向一条命令时才生效 → 各群说『门店』各自出本群品牌",
+      "chats": ["把A品牌群ID填这里"],
+      "cwd": "D:\\你的脚本目录",
+      "exe": "D:\\你的Python\\python.exe",
+      "args": ["-X", "utf8", "另一个脚本.py", "--dry"],
+      "extract": "separator",
+      "dropLines": ["^---\\s*第", "^\\[", "^\\(未发送", "^=== "],
+      "timeoutMs": 300000,
+      "long": true
+    }
+  ]
+}
