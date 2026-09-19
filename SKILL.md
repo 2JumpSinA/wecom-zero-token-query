@@ -183,7 +183,9 @@ wecom-zero-token-query/
 │   └── _preview_check.py         回归测试：证明"preview 绝不偷推"
 ├── references/                   11 份文档，索引见 §6
 ├── examples/                     三个可跑样板适配器（A 正式 API / B 私有接口 / C 导出文件）+ README
-├── scripts/                      一键安装 install.ps1 · 环境探测 probe-env.ps1
+├── tests/test_adapters.py        10 条断言级回归（契约 5 + 逻辑 4 + 失败路径 1）
+├── scripts/                      install.ps1 一键安装 · probe-env.ps1 环境探测 · pack.ps1 干净打包
+├── VERSION / CHANGELOG.md        版本号与变更记录（打包脚本读 VERSION）
 └── docs/标准操作手册.md/.docx      给「没有 Python 基础的人」看的逐步手册（可直接转发）
 ```
 
@@ -213,4 +215,7 @@ wecom-zero-token-query/
 - [ ] 群里实测一条命令，结果正确且**只有一条回复**（没有双推）
 - [ ] 心跳新鲜、`watchdog.log` 安静、屏幕无闪窗
 - [ ] 配置里**没有**写死本机绝对路径（用 `${HERE}` / 环境变量）
+- [ ] `--status` 输出正常（进程 / 连接 / 心跳 / 最近执行），群里发「状态」也能拿到同一份
+- [ ] 连续失败告警已按需开启（`alerts`），并用 `--alert-selftest` 验过状态机
+- [ ] `python -m unittest discover -s tests` 全绿（改了样板就跑）
 - [ ] 明确告知用户：能力上限 = 放进命令表的只读脚本；secret 不要外发
