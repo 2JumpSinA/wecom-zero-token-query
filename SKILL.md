@@ -1,7 +1,7 @@
 ---
 name: wecom-zero-token-query
 display_name: 企微零 Token 数据查询直调通道
-version: 1.0.0
+version: 2.2.0
 agent_created: true
 description: >-
   把「固定几类数据查询」做成企业微信里的零 token 直调入口：群里 @机器人 发命令 → 本机脚本直接取数 → 结果回到群里，
@@ -37,7 +37,7 @@ description: >-
 | 层 | 职责 | 通用性 | 文档 |
 |---|---|---|---|
 | **取数层** | 从数据平台把数据拿下来变成文本 | ★☆☆☆☆ 平台各异，**不可能完全通用** | `07` 选路决策树 · `08` 脚本契约 |
-| **通道层** | 收企微消息 → 匹配命令 → 跑脚本 → 回群 | ★★★★★ 与数据源零耦合 | `01` `02` `10` `05` |
+| **通道层** | 收企微消息 → 匹配命令 → 跑脚本 → 回群 | ★★★★★ 与数据源零耦合 | `01` `02` `10` `11` `05` |
 | **部署层** | 环境、凭据、常驻、离线、升级 | ★★★★☆ | `04` `09` |
 
 **三层唯一的耦合面是「脚本契约」**（只读可预演 / 正文可提取 / 退出码有语义 / 无交互有超时）。
@@ -153,6 +153,7 @@ schtasks /run /tn WecomFastlane
 | **剥掉 `<font>` 标签再回群** | 智能机器人的 markdown 不支持颜色标签，不剥就是裸标签 |
 | **命令表写死、只放只读脚本** | 能力上限 = 你放进去的脚本；没有任意命令执行能力，才敢开放给同事 |
 | **非白名单静默忽略** | 不给任何回应，不暴露机器人存在 |
+| **缓存必须配一条"它有多旧"的出口** | 读缓存会把"数据旧了"变成新的静默失败来源 —— 所以数据时间、陈旧警告、陈旧告警、体检里的年龄，一个都不能少（见 `11`） |
 
 ## 4. 排查（前 6 条覆盖绝大多数问题）
 
@@ -160,7 +161,8 @@ schtasks /run /tn WecomFastlane
 |---|---|---|
 | 群里 @ 了没反应 | `logs\fastlane.log` 有没有"收到消息" | 没有 → 机器人没进群 / 程序没在跑（看 `logs\fastlane.pid`、`heartbeat.txt`）；有 → userid 或群 ID 不在白名单 |
 | 有"收到消息"但没"开始执行" | 同上 | 触发词没命中，用 `--routes` 核对写法 |
-| 回复很久才出来 | 脚本耗时 | 正常（余额实测 20 秒）；占位消息会先到 |
+| 回复很久才出来 | 脚本耗时 | 正常（一条 20 秒的查询改读采集结果后会降到毫秒级，见 `11`）；占位消息会先到 |
+| 正文带「⚠️ 数据已 N 分钟未更新」 | `logs\collect.log` | 采集没采到新数据；`--collect <源>` 手动采一次，看它报什么错 |
 | 正文里出现 `<font color="comment">` | 脚本用了 HTML 标签 | 让脚本改用 `**加粗**`；通道也会自动剥 |
 | 屏幕每分钟闪一下 | 计划任务动作 | 改走 `watchdog-hidden.vbs`（wscript） |
 | 说 `secret 缺失` / 认证失败 | secret 文件 | UTF-8 无 BOM、只有一行、无多余空格 |
@@ -175,15 +177,19 @@ wecom-zero-token-query/
 ├── assets/                       可直接复制的运行时代码
 │   ├── fastlane.mjs              守护进程（命令表 → 脚本 → 剥标签 → 作用域裁剪 → 流式回群）
 │   │                             自带 --check / --routes / --selftest / --list / --probe / --as-group
-│   ├── commands.example.json     配置模板（脱敏，含变量展开示例）
+│   │                             以及采集与缓存：--collect / --query / --stale-selftest / --stale-check / --history
+│   ├── commands.example.json     配置模板（脱敏，含变量展开与 collect/freshness/history/alerts.stale 示例）
 │   ├── run-fastlane.cmd          启动器
 │   ├── start-hidden.vbs          静默启动
 │   ├── fastlane-watchdog.ps1     看门狗（短命检查：进程 + 心跳 + pid 三条件）
 │   ├── watchdog-hidden.vbs       计划任务入口（wscript，不闪窗）
+│   ├── collect-hidden.vbs        采集器计划任务入口（**可选**：默认采集器跑在守护进程里）
+│   ├── register-collect-task.ps1 + 注册采集任务.cmd   想把采集改成系统计划任务时的入口（需管理员，同上）
 │   └── _preview_check.py         回归测试：证明"preview 绝不偷推"
-├── references/                   11 份文档，索引见 §6
+├── references/                   12 份文档，索引见 §6
 ├── examples/                     三个可跑样板适配器（A 正式 API / B 私有接口 / C 导出文件）+ README
 ├── tests/test_adapters.py        10 条断言级回归（契约 5 + 逻辑 4 + 失败路径 1）
+├── tests/test_cache_layer.py     15 条断言级回归（采集/缓存/陈旧告警/历史留档；沙箱跑真程序，不联网不发群）
 ├── scripts/                      install.ps1 一键安装 · probe-env.ps1 环境探测 · pack.ps1 干净打包
 ├── VERSION / CHANGELOG.md        版本号与变更记录（打包脚本读 VERSION）
 └── docs/标准操作手册.md/.docx      给「没有 Python 基础的人」看的逐步手册（可直接转发）
@@ -204,6 +210,7 @@ wecom-zero-token-query/
 | `references/08-脚本接入契约与探针.md` | **要接入一个脚本**：四条契约 + `--probe` 探针用法 |
 | `references/09-本地化部署.md` | **换台机器部署**：环境探测、变量路径、凭据、离线、升级回滚 |
 | `references/10-泛化模型与作用域.md` | 把"品牌"泛化成任意维度（渠道/区域/账号）；多租户闸门 |
+| `references/11-采集与缓存.md` | **查询慢 / 想让平台挂了也能答**：查询改读采集结果（快照 + 数据时间 + 陈旧告警 + 历史留档），每条命令只加一个 `snapshot` 字段 |
 | `docs/标准操作手册.md` | 给最终使用者（非技术人员）的逐步手册，可直接转发 |
 
 ## 7. 交付前自检清单
@@ -218,5 +225,11 @@ wecom-zero-token-query/
 - [ ] `--status` 输出正常（进程 / 连接 / 心跳 / 最近执行），群里发「状态」也能拿到同一份
 - [ ] 连续失败告警已按需开启（`alerts`），并用 `--alert-selftest` 验过状态机
 - [ ] 失败人话提示已按需配置（`authHints`），并用 `--hint-selftest` 验过命中
-- [ ] `python -m unittest discover -s tests` 全绿（改了样板就跑）
+- [ ] 慢查询已改读采集结果（命令上 `"snapshot": "<源名>"` + 顶层 `collect`），并用 `--query <命令>`
+      验过「读缓存」与正文首行的「数据时间」
+- [ ] 陈旧告警已按需开启（`alerts.stale`，**只推运维群**），并用 `--stale-check` / `--stale-selftest` 验过
+- [ ] 破坏性演练做过一次：把某条命令的 `exe` 指向不存在的路径 + 把快照数据时间伪造成 2 小时前
+      → 期望「采集如实报失败 + 陈旧告警到群 + 查询仍毫秒返回旧数据并带陈旧提示」
+- [ ] 体检里有采集与缓存项（每条源的「数据时间 + 年龄 + 今日留档 N/M 轮成功」）
+- [ ] `python -m unittest discover -s tests` 全绿（改了样板或缓存层就跑）
 - [ ] 明确告知用户：能力上限 = 放进命令表的只读脚本；secret 不要外发
