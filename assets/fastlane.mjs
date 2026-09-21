@@ -20,13 +20,18 @@
  *   node fastlane.mjs --check            自检配置 / SDK / 凭据（不联网）
  *   node fastlane.mjs --selftest [命令]   本地跑命令并打印，验证「只产文本不推群」（不联网）
  *   node fastlane.mjs --list             列出命令表
+ *   node fastlane.mjs --collect [命令]    采集：跑带 snapshot 的命令，把正文落进 snapshots\（联网取数、不发群）
+ *   node fastlane.mjs --query <命令>      离线预演：走与群内查询完全相同的「读缓存 + 裁剪 + 数据时间」路径，只打印
+ *   node fastlane.mjs --stale-selftest   陈旧告警判定自检（喂样本、不联网、不打扰群）
+ *   node fastlane.mjs --stale-check      拿真实快照跑一遍陈旧告警判定，打印"会推什么"（不推群）
+ *   node fastlane.mjs --history [源] [--date YYYY-MM-DD]   回看某天的采集留档与空档（只读本地文件）
  *
  * 配置：同目录 commands.json（命令表 + 白名单 + botId）
  * 凭据：环境变量（commands.json 的 secretEnv）优先，其次同目录 secret.txt
  * 日志：logs\fastlane.log
  */
 import { spawn } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -40,6 +45,9 @@ const PID_FILE = path.join(LOG_DIR, 'fastlane.pid');
 const LOG_MAX_BYTES = 5 * 1024 * 1024;
 const MAX_REPLY_BYTES = 20000; // SDK 上限 20480 字节，留余量
 const SEPARATOR_RE = /^\s*={10,}\s*$/;
+const SNAPSHOT_DIR = path.join(HERE, 'snapshots');
+const HISTORY_DIR = path.join(HERE, 'history');
+const COLLECT_LOG_FILE = path.join(LOG_DIR, 'collect.log');
 
 // ---------------------------------------------------------------- 日志
 function stamp() {
@@ -204,6 +212,342 @@ function runCommand(entry) {
       resolve({ ok: code === 0, code, out, err, ms: Date.now() - started });
     });
   });
+}
+
+// ---------------------------------------------------------------- 快照缓存
+/**
+ * 「查询＝读采集结果」的落地（设计见 `架构改进备忘.md` §3）。
+ *
+ * 为什么这么改：现状是「查询＝现场抓取」——余额要 20 秒，且平台挂了/凭据过期
+ * 就答不出来。改成读采集结果后：毫秒响应、平台出事也能答、对平台的请求量从
+ * 「谁想起来问就抓一次」变成「每 10 分钟固定一次」。
+ *
+ * 为什么先缓存 markdown 原文而不是结构化数据：改动最小、复用全部现有脚本
+ * （脚本本来就有「只打印不推送」模式），立刻拿到收益。代价是「改文案要重采
+ * 一次」——手动跑一次 --collect 即可抹平。等真需要「同源不同口径」再升级结构。
+ *
+ * 为什么存**未裁剪**的正文：品牌裁剪是按群做的（applyBrandScope），采集的
+ * 那一刻并不知道将来会被哪个群查，所以存全量、查询时再裁。
+ */
+function ensureSnapshotDir() {
+  if (!existsSync(SNAPSHOT_DIR)) mkdirSync(SNAPSHOT_DIR, { recursive: true });
+}
+
+/** 采集器专用日志：守护进程的 fastlane.log 是「谁问了什么」，采集是后台噪声，分开写 */
+function logCollect(message) {
+  const line = `[${stamp()}] ${message}`;
+  console.log(line);
+  try {
+    if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
+    // 与 fastlane.log 同样轮转：每 10 分钟一轮、每轮几行，一天约 50KB —— 不轮转也不会立刻出事，
+    // 但「日志悄悄长到几个 G」是这类常驻脚本最经典的坑，一眼能防就别留。
+    if (existsSync(COLLECT_LOG_FILE) && statSync(COLLECT_LOG_FILE).size > LOG_MAX_BYTES) {
+      renameSync(COLLECT_LOG_FILE, `${COLLECT_LOG_FILE}.1`);
+    }
+    appendFileSync(COLLECT_LOG_FILE, line + '\n', 'utf8');
+  } catch {
+    /* 日志失败不能影响采集 */
+  }
+}
+
+function snapshotPath(source) {
+  const safe = String(source).replace(/[^A-Za-z0-9._-]/g, '_');
+  return path.join(SNAPSHOT_DIR, `${safe}.json`);
+}
+
+/** 读一份快照；文件不存在/内容坏了都返回 null —— 调用方据此回退现场抓取，绝不因缓存而答不出 */
+function readSnapshot(source) {
+  try {
+    const snap = JSON.parse(readFileSync(snapshotPath(source), 'utf8'));
+    if (!snap || typeof snap !== 'object' || typeof snap.markdown !== 'string') return null;
+    return snap;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 原子写：先写 .tmp 再 rename 覆盖。
+ * 为什么必须这样：查询侧随时可能读这份文件，直接覆写会让它读到半个 JSON；
+ * rename 是原子的，读到的要么是旧的完整版、要么是新的完整版。
+ */
+function writeSnapshot(source, data) {
+  ensureSnapshotDir();
+  const target = snapshotPath(source);
+  const tmp = `${target}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+  renameSync(tmp, target);
+  return target;
+}
+
+function snapshotAgeMinutes(snap) {
+  const t = Date.parse(snap?.captured_at ?? '');
+  if (!Number.isFinite(t)) return Number.POSITIVE_INFINITY;
+  return (Date.now() - t) / 60000;
+}
+
+/**
+ * 新鲜度阈值（每条命令可覆盖全局 freshness 配置）：
+ *   staleMinutes —— 超过就在正文里加一行「⚠️ 数据已 N 分钟未更新」
+ *   maxAgeMinutes —— 超过就不再用缓存、回退现场抓取（防止采集器死掉后一直答旧数）
+ */
+function snapshotLimits(cmd, cfg) {
+  const f = cfg?.freshness ?? {};
+  const pick = (v, d) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : d);
+  return {
+    stale: pick(cmd?.staleMinutes ?? f.staleMinutes, 30),
+    maxAge: pick(cmd?.maxAgeMinutes ?? f.maxAgeMinutes, 180),
+  };
+}
+
+function hhmm(ms) {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+function humanAge(minutes) {
+  if (!Number.isFinite(minutes)) return '时间未知';
+  if (minutes < 1) return '刚刚';
+  if (minutes < 60) return `${Math.round(minutes)} 分钟前`;
+  const h = Math.floor(minutes / 60);
+  return `${h} 小时 ${Math.round(minutes % 60)} 分前`;
+}
+
+/**
+ * 「这个源现在什么数据时间」的一句话。
+ * 为什么单独抽出来：captured_at 为空＝这个源一次都没成功过，直接 `hhmm(Date.parse(''))`
+ * 会印出 `NaN:NaN`；而这句话要在四处显示（群内「状态」/ `--check` / 陈旧告警 / 体检）。
+ */
+function dataTimeText(snap) {
+  const t = Date.parse(snap?.captured_at ?? '');
+  if (!Number.isFinite(t)) return '从未采集成功';
+  return `${hhmm(t)}（${humanAge((Date.now() - t) / 60000)}）`;
+}
+
+/**
+ * 正文第一行的「数据时间」。
+ * 为什么由这里统一加、不让每个脚本各写一遍：格式只维护一处；而且「陈旧与否」
+ * 取决于被查询的那一刻，脚本自己产出的那一刻并不知道。
+ */
+function freshnessLine(snap, cmd, cfg) {
+  const t = Date.parse(snap?.captured_at ?? '');
+  if (!Number.isFinite(t)) return '';
+  const age = (Date.now() - t) / 60000;
+  const lines = [`> 数据时间：${hhmm(t)}（${humanAge(age)}）`];
+  const { stale } = snapshotLimits(cmd, cfg);
+  if (age > stale) lines.push(`> ⚠️ 数据已 ${Math.round(age)} 分钟未更新，仅供参考`);
+  return lines.join('\n');
+}
+
+/** 现场抓取路径用的数据时间（诚实地标明这是实时取数，不是缓存） */
+function liveFreshnessLine() {
+  return `> 数据时间：${hhmm(Date.now())}（实时取数）`;
+}
+
+/**
+ * 命中缓存就返回正文（未裁剪）+ 快照，否则 null → 调用方走现场抓取。
+ * 只有配了 "snapshot" 的命令才走这条路 —— 其余命令的行为与改动前完全一致。
+ */
+function snapshotPayload(cmd, cfg) {
+  if (!cmd?.snapshot) return null;
+  const snap = readSnapshot(cmd.snapshot);
+  if (!snap || !String(snap.markdown ?? '').trim()) return null;
+  const ageMin = snapshotAgeMinutes(snap);
+  const { maxAge } = snapshotLimits(cmd, cfg);
+  if (ageMin > maxAge) {
+    const ageText = Number.isFinite(ageMin) ? `${Math.round(ageMin)} 分钟` : '从未成功';
+    log(`快照不能用：${cmd.snapshot} 的数据时间 ${ageText}（上限 ${maxAge} 分钟）→ 回退现场抓取`);
+    return null;
+  }
+  // 最近一次采集失败也照样答：这正是「查询改读缓存」的主要收益 —— 平台挂了、凭据过期，
+  // 群里问一句仍然毫秒返回上次成功的数据，正文里带着数据时间和陈旧提示。
+  // 原先这里要求 snap.ok === true，那会让「平台一挂，旧数据也不给用」，正好丢掉收益。
+  if (snap.ok !== true) log(`读缓存（注意 ${cmd.snapshot} 最近一次采集失败，用的是上次成功的数据）`);
+  return { markdown: snap.markdown, snap, ageMin };
+}
+
+// ---------------------------------------------------------------- 历史留档（P2「可补采」）
+/**
+ * 为什么需要（架构改进备忘 §2 的 P2）：快照只留最新一份，机器一停两小时，
+ * 那两小时里采到的数据就被下一轮覆盖掉了 —— 事后谁也说不清"那时候是多少"。
+ *
+ * **一个必须说清的边界**：平台不给历史查询（余额是当前值、门店是当前营业状态、
+ * 订单是"截至现在"的累计），所以这里的「补采」只能是**本地留档 + 空档可见**，
+ * 不是"回平台把中间那两小时的数据补出来"。想让这句话变成假话，只能等 P1 的开放平台 API。
+ *
+ * 存储：`history\<源>\<YYYY-MM-DD>.jsonl`，一行一条、append-only
+ * （追加写的好处：进程被强杀最多丢最后一行，前面的记录都还在，而"每轮覆盖一个 JSON 文件"
+ * 一旦写坏就是全丢）。同一天按小时留档，`--history` 可以按天回看。
+ */
+function localDay(ms) {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function historyDir(source) {
+  return path.join(HISTORY_DIR, String(source).replace(/[^A-Za-z0-9._-]/g, '_'));
+}
+
+function historyPath(source, day) {
+  return path.join(historyDir(source), `${day}.jsonl`);
+}
+
+/** 追加一条历史；失败只记日志，绝不影响采集本身 */
+function appendHistory(cfg, source, record) {
+  if (cfg?.history?.enabled === false) return;
+  try {
+    const dir = historyDir(source);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const day = localDay(Date.parse(record.at) || Date.now());
+    appendFileSync(historyPath(source, day), JSON.stringify(record) + '\n', 'utf8');
+  } catch (e) {
+    logCollect(`写历史失败（不影响采集）：${source} ${e?.message ?? e}`);
+  }
+}
+
+/** 读某天的记录；坏行跳过（append-only 日志最常见的坏法是最后一行只写了一半） */
+function readHistory(source, day) {
+  try {
+    return readFileSync(historyPath(source, day), 'utf8')
+      .split('\n')
+      .filter((l) => l.trim())
+      .map((l) => {
+        try {
+          return JSON.parse(l);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 空档统计：相邻两次**成功**之间隔了多久，超过 `graceFactor × 采集周期` 的算一个空档。
+ * 为什么只看成功：失败轮次虽然也留了档，但它们本身不产生数据。
+ */
+function historyStats(records, everyMinutes, graceFactor) {
+  const okTimes = records
+    .filter((r) => r.ok)
+    .map((r) => Date.parse(r.at))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+  const limitMin = Number(everyMinutes || 10) * Number(graceFactor ?? 2.5);
+  const gaps = [];
+  for (let i = 1; i < okTimes.length; i += 1) {
+    const minutes = (okTimes[i] - okTimes[i - 1]) / 60000;
+    if (minutes > limitMin) gaps.push({ from: okTimes[i - 1], to: okTimes[i], minutes: Math.round(minutes) });
+  }
+  return {
+    rounds: records.length,
+    okRounds: okTimes.length,
+    failRounds: records.length - okTimes.length,
+    gaps,
+    longestGapMin: gaps.reduce((m, g) => Math.max(m, g.minutes), 0),
+  };
+}
+
+/** 清理超过 keepDays 的历史文件；每轮采集后跑一次，成本可忽略 */
+function pruneHistory(cfg) {
+  const keepDays = Number(cfg?.history?.keepDays ?? 14);
+  if (!Number.isFinite(keepDays) || keepDays <= 0) return 0;
+  const cutoff = localDay(Date.now() - keepDays * 86400000); // YYYY-MM-DD 字典序 = 时间序
+  let removed = 0;
+  try {
+    for (const d of readdirSync(HISTORY_DIR, { withFileTypes: true })) {
+      if (!d.isDirectory()) continue;
+      const dir = path.join(HISTORY_DIR, d.name);
+      for (const f of readdirSync(dir)) {
+        if (!/^\d{4}-\d{2}-\d{2}\.jsonl$/.test(f)) continue;
+        if (f.slice(0, 10) < cutoff) {
+          rmSync(path.join(dir, f), { force: true });
+          removed += 1;
+        }
+      }
+    }
+  } catch {
+    /* 目录不存在等一律忽略：清理失败不是故障 */
+  }
+  if (removed) logCollect(`清理了 ${removed} 个超过 ${keepDays} 天的历史文件`);
+  return removed;
+}
+
+/**
+ * 采集：跑带 snapshot 的命令的「只打印」模式，把正文落盘。
+ *   node fastlane.mjs --collect [命令]
+ * 注意：采集成功才覆盖 markdown；失败时保留上一份好数据并累加 fails ——
+ * 这样「平台挂了」期间群里问余额，仍然答得出（这是本次改造的主要收益）。
+ */
+async function collect(cfg, only) {
+  const targets = cfg.commands.filter(
+    (c) =>
+      c.enabled !== false &&
+      c.snapshot &&
+      !c.builtin &&
+      (!only || c.id === only || c.label === only || (c.match ?? []).includes(only)),
+  );
+  if (!targets.length) {
+    logCollect(only ? `没有匹配「${only}」的可采集命令（命令需要配 "snapshot" 字段）` : '没有配置任何 snapshot 命令，跳过');
+    return 1;
+  }
+  logCollect(`开始采集 ${targets.length} 条：${targets.map((c) => c.id).join(', ')}`);
+  let bad = 0;
+  for (const c of targets) {
+    const prev = readSnapshot(c.snapshot);
+    const res = await runCommand(c);
+    let payload = '';
+    try {
+      payload = res.ok ? extractPayload(c, res.out) : '';
+    } catch (e) {
+      logCollect(`提取正文异常：${c.id} ${e?.message ?? e}`);
+    }
+    const ok = Boolean(res.ok && payload.trim());
+    const now = new Date().toISOString();
+    // captured_at 的语义是「**这份正文**是什么时候取到的」，所以只有采集成功才推进它。
+    // 踩过的坑（2026-09-21，铺第 2~5 条源时发现）：一开始失败也把 captured_at 写成 now，
+    // 于是「刚失败过的源」看起来永远刚刚更新过 —— 陈旧告警永远不触发，正是我们要消灭的
+    // 那类静默失败。失败时保留上次成功的时间（从未成功过就留空 → 年龄 = 无穷大）。
+    const prevAt = String(prev?.captured_at ?? '');
+    const data = {
+      source: c.snapshot,
+      command_id: c.id,
+      captured_at: ok ? now : prevAt,
+      last_attempt_at: now,
+      ok,
+      error: ok ? '' : String((res.err || res.out || '').trim().split('\n').slice(-6).join('\n') || `exit=${res.code}`),
+      ms: res.ms,
+      markdown: ok ? payload : String(prev?.markdown ?? ''),
+      last_success_at: ok ? now : String(prev?.last_success_at ?? ''),
+      fails: ok ? 0 : Number(prev?.fails ?? 0) + 1,
+    };
+    try {
+      const file = writeSnapshot(c.snapshot, data);
+      // 历史留档与快照分开写：快照给查询用（只要最新那份），历史给"事后回看"用
+      appendHistory(cfg, c.snapshot, {
+        at: now,
+        ok,
+        ms: res.ms,
+        command_id: c.id,
+        error: ok ? '' : data.error,
+        markdown: ok ? payload : '',
+      });
+      logCollect(
+        `${ok ? '成功' : '失败'} ${c.id} → ${path.basename(file)}　exit=${res.code} 耗时=${(res.ms / 1000).toFixed(1)}s ` +
+          `正文=${Buffer.byteLength(payload, 'utf8')}B${ok ? '' : `　连续失败=${data.fails}　原因=${data.error.replace(/\n/g, ' | ')}`}`,
+      );
+    } catch (e) {
+      bad += 1;
+      logCollect(`写快照失败：${c.id} ${e?.message ?? e}`);
+      continue;
+    }
+    if (!ok) bad += 1;
+  }
+  pruneHistory(cfg);
+  logCollect(bad ? `采集结束：${bad}/${targets.length} 条失败` : `采集结束：${targets.length} 条全部成功`);
+  return bad ? 1 : 0;
 }
 
 /**
@@ -482,6 +826,22 @@ function buildStatusText(cfg, rt) {
     `> 当前任务：${running ?? '空闲'}`,
     `> 命令数：${cfg.commands.filter((c) => c.enabled !== false).length} 条｜访问策略：${cfg.allowAllUsers === true ? '对所有人开放' : '白名单'}`,
   ];
+  // 数据源时间（查询改读采集结果之后，最该被一眼看见的就是"这份数据多旧"）
+  const snapCmds = cfg.commands.filter((c) => c.enabled !== false && c.snapshot);
+  if (snapCmds.length) {
+    lines.push('> 数据源（采集结果）：');
+    for (const c of snapCmds) {
+      const snap = readSnapshot(c.snapshot);
+      if (!snap) {
+        lines.push(`> · ${c.snapshot}：没有数据`);
+        continue;
+      }
+      const age = snapshotAgeMinutes(snap);
+      const { stale } = snapshotLimits(c, cfg);
+      const flag = !snap.ok ? ' ⚠ 最近一次采集失败' : age > stale ? ' ⚠ 超过陈旧线' : '';
+      lines.push(`> · ${c.snapshot}：${dataTimeText(snap)}${flag}`);
+    }
+  }
   const recent = [...lastRuns.entries()].slice(-5);
   if (recent.length) {
     lines.push('> 最近执行：');
@@ -536,10 +896,100 @@ function authHintFor(text, cfg) {
   }
   try {
     await client.sendMessage(chatId, { msgtype: 'markdown', markdown: { content: text } });
-    log(`已推送连续失败告警到 ${chatId}`);
+    // 措辞故意中性：这个函数既服务「连续失败告警」也服务「采集陈旧告警」
+    log(`已推送告警到 ${chatId}`);
   } catch (e) {
     log(`告警推送失败：${e?.message ?? e}`);
   }
+}
+
+// ---------------------------------------------------------------- 陈旧告警
+/**
+ * 「坏了自己出声」（架构改进备忘 §2 P0 第 3 项 / §3.3）。
+ *
+ * 为什么需要：查询改读缓存之后，采集器一旦悄悄停摆，群里的回复会**看起来正常**
+ * 但数据越来越旧 —— 这正是备忘开头列的那类静默失败。所以判定不挂在查询路径上
+ * （等有人来问才知道，就已经晚了），而是跟着采集轮次走。
+ *
+ * 判定写成纯函数，好让 --stale-selftest 离线验证；冷却状态与「连续失败告警」
+ * 同一个风格，只是按「源」而不是按「命令」记。
+ */
+const staleAlerted = new Map(); // source -> lastAlertAt
+
+function staleDecision(name, ageMin, st, lastAlertAt, now) {
+  const t = now ?? Date.now();
+  if (st?.enabled === false) return { alert: false, reason: 'stale.enabled=false' };
+  const after = Number(st?.afterMinutes ?? 30);
+  if (!(ageMin > after)) {
+    const cur = Number.isFinite(ageMin) ? `${Math.round(ageMin)} 分钟` : '从未成功';
+    return { alert: false, reason: `未超过陈旧线 ${after} 分钟（当前 ${cur}）` };
+  }
+  const cooldownMs = Number(st?.cooldownMinutes ?? 180) * 60000;
+  const since = t - Number(lastAlertAt ?? 0);
+  if (lastAlertAt && since < cooldownMs) {
+    return { alert: false, reason: `冷却中（还需 ${Math.ceil((cooldownMs - since) / 60000)} 分钟）` };
+  }
+  const why = Number.isFinite(ageMin) ? `已 ${Math.round(ageMin)} 分钟没有新数据` : '从来没有采集成功过';
+  return { alert: true, reason: `${name} ${why}（陈旧线 ${after} 分钟）` };
+}
+
+/** 一条陈旧告警的正文（抽出来是为了让 --stale-check 打印的和线上推的**逐字一致**） */
+function staleAlertText(cmd, snap, ageMin) {
+  const detail = snap
+    ? `> 源：${cmd.snapshot}（${cmd.label}）｜数据时间 ${dataTimeText(snap)}` +
+      (snap.ok ? '' : `｜最近一次采集失败（连续 ${snap.fails} 次）`)
+    : `> 源：${cmd.snapshot}（${cmd.label}）｜从来没有采集成功过（snapshots 里没有这个文件）`;
+  const err = snap && !snap.ok && snap.error ? `\n> 失败原因：${String(snap.error).replace(/\n/g, ' ｜ ').slice(0, 200)}` : '';
+  return (
+    `### ⚠️ 采集器数据陈旧\n${detail}${err}\n` +
+    '> 影响：群内查询会退回现场抓取（慢；平台/凭据真出事时会一起失败）\n' +
+    '> 排查：本机 `logs\\collect.log`；群里发「登录态」看凭据；`体检.cmd` 也会报这一项'
+  );
+}
+
+/**
+ * 此刻各源的陈旧判定（**不含推送**）。
+ * 守护进程的推送达成都和 `--stale-check` 用同一份结果 —— 这样"演练时看到什么"就是"线上会推什么"，
+ * 否则演练只能证明"演练的代码对"，证明不了线上的那一份。
+ */
+function staleReport(cfg) {
+  const st = cfg.alerts?.stale ?? {};
+  return cfg.commands
+    .filter((c) => c.enabled !== false && c.snapshot)
+    .map((c) => {
+      const snap = readSnapshot(c.snapshot);
+      const ageMin = snap ? snapshotAgeMinutes(snap) : Number.POSITIVE_INFINITY;
+      const dec = staleDecision(c.snapshot, ageMin, st, staleAlerted.get(c.snapshot));
+      return { cmd: c, snap, ageMin, dec, text: staleAlertText(c, snap, ageMin) };
+    });
+}
+
+/** 采集轮结束后跑一遍：哪个源该出声就出声。返回本次真正推送的源数（便于自检/日志） */
+async function staleCheck(client, cfg) {
+  const st = cfg.alerts?.stale ?? {};
+  const chats = (st.chats ?? []).map(String).filter(Boolean);
+  let sent = 0;
+
+  for (const r of staleReport(cfg)) {
+    if (!r.dec.alert) continue;
+
+    // 先记冷却再决定推不推：dryRun 也记，否则演练时每轮都刷一遍日志
+    staleAlerted.set(r.cmd.snapshot, Date.now());
+    if (!chats.length) {
+      logCollect(`陈旧告警（未配 chats，只记日志）：${r.dec.reason}`);
+      continue;
+    }
+    if (st.dryRun === true) {
+      logCollect(`[dryRun] 陈旧告警本该推送：${r.dec.reason} → ${chats.join(', ')}`);
+      sent += 1;
+      continue;
+    }
+    // sendAlert 内部还会看 alerts.dryRun（总开关），两层都拦得住
+    for (const chatId of chats) await sendAlert(client, cfg, chatId, r.text);
+    logCollect(`陈旧告警已推送：${r.dec.reason} → ${chats.join(', ')}`);
+    sent += 1;
+  }
+  return sent;
 }
 
 // ---------------------------------------------------------------- 主流程
@@ -608,6 +1058,51 @@ async function serve(cfg, sdk) {
     if (connected) beat('alive');
   }, 60000);
   heartbeatTimer.unref?.();
+
+  // ------------------------------------------------------------ 内置采集器
+  // 架构改进备忘 §6 第 2 步原本是注册计划任务 WecomCollect（每 10 分钟跑一次
+  // --collect）。2026-09-21 实施时发现：注册计划任务需要管理员权限，而本会话
+  // 是非提权会话（schtasks 与 Register-ScheduledTask 都被拒绝），于是把采集挂进
+  // 守护进程自身 —— 它本来就常驻，这样不闪窗、不多占一个进程，且生命周期正好
+  // 落在「看门狗每分钟体检 + 心跳带 pid」这套已验证的机制里。
+  // 代价：守护进程挂掉时采集跟着停（看门狗 1 分钟内会把它拉起来）。
+  // 想改回系统计划任务：把配置里 collect.enabled 设为 false，再运行
+  // 注册采集任务.cmd（需要右键以管理员身份运行）。
+  const collectCfg = cfg.collect ?? {};
+  const collectEveryMin = Number(collectCfg.everyMinutes ?? 10) || 10;
+  const hasSnapshotCmd = cfg.commands.some((c) => c.enabled !== false && c.snapshot);
+  let collecting = false;
+
+  async function collectTick(reason) {
+    if (collecting) return;
+    if (running) {
+      // 采集和群内查询都会去平台取数，撞在一起没必要（查询优先，它有人在等）
+      logCollect(`跳过本轮采集：有查询正在执行（${running}）`);
+      return;
+    }
+    collecting = true;
+    try {
+      const code = await collect(cfg);
+      logCollect(`定时采集（${reason}）结束：exit=${code}`);
+      // 采集完立刻判定陈旧：数据是刚写的，这一轮没成功、又过了线的源就该出声
+      await staleCheck(client, cfg);
+    } catch (e) {
+      logCollect(`定时采集异常：${e?.stack ?? e}`);
+    } finally {
+      collecting = false;
+    }
+  }
+
+  if (hasSnapshotCmd && collectCfg.enabled !== false) {
+    const firstDelayMs = Math.max(0, Number(collectCfg.startDelaySeconds ?? 30)) * 1000;
+    const kickoff = setTimeout(() => void collectTick('启动后首采'), firstDelayMs);
+    kickoff.unref?.();
+    const collectTimer = setInterval(() => void collectTick('定时'), collectEveryMin * 60000);
+    collectTimer.unref?.();
+    log(`内置采集器已启用：每 ${collectEveryMin} 分钟采集一次，${Math.round(firstDelayMs / 1000)} 秒后首采`);
+  } else {
+    log(`内置采集器未启用（${hasSnapshotCmd ? 'collect.enabled=false' : '没有任何命令配 snapshot'}）`);
+  }
 
   client.on('event.enter_chat', async (frame) => {
     try {
@@ -684,6 +1179,27 @@ async function serve(cfg, sdk) {
       return;
     }
 
+    // —— 读缓存路径（P0：查询＝读采集结果）——
+    // 放在单飞检查之前：命中缓存是毫秒级的，既不必排队等前面那条查询，也不用发
+    // 「正在取数…」占位。只有配了 "snapshot" 的命令会走到这里，其余命令一字不变。
+    const cached = snapshotPayload(cmd, cfg);
+    if (cached) {
+      const t0 = Date.now();
+      const body = applyBrandScope(cached.markdown, cmd, cfg, chatId, chattype);
+      const payload = [freshnessLine(cached.snap, cmd, cfg), body].filter(Boolean).join('\n\n');
+      const clipped =
+        Buffer.byteLength(payload, 'utf8') > MAX_REPLY_BYTES
+          ? payload.slice(0, MAX_REPLY_BYTES) + '\n> （内容过长已截断，完整明细见本地日志）'
+          : payload;
+      const renderMs = Date.now() - t0;
+      log(`读缓存命中：${cmd.id} 源=${cmd.snapshot} 数据时间=${cached.snap.captured_at}（${humanAge(cached.ageMin)}）渲染=${renderMs}ms 正文=${Buffer.byteLength(clipped, 'utf8')}B`);
+      noteSuccess(cmd.id);
+      lastRuns.set(cmd.id, { ts: Date.now(), ok: true, code: 0, ms: renderMs });
+      await client.replyStream(frame, streamId, clipped, true);
+      return;
+    }
+    if (cmd.snapshot) log(`缓存未命中：${cmd.id}（源 ${cmd.snapshot}）→ 回退现场抓取`);
+
     if (running) {
       await client.replyStream(frame, streamId, `> 上一条查询（${running}）还在执行，请等它出结果后再试。`, true);
       return;
@@ -699,13 +1215,16 @@ async function serve(cfg, sdk) {
 
     try {
       const res = await runCommand(cmd);
-      const payload = applyBrandScope(
+      const body = applyBrandScope(
         extractPayload(cmd, res.out),
         cmd,
         cfg,
         chatId,
         chattype,
       );
+      // 现场抓取也要标数据时间（同为「让新鲜度可见」的一部分，见 §3.2）；
+      // 没配 snapshot 的命令保持原样，渲染路径不做任何改动。
+      const payload = cmd.snapshot && body ? [liveFreshnessLine(), body].join('\n\n') : body;
       log(`执行结束：${cmd.id} exit=${res.code} ${(res.ms / 1000).toFixed(1)}s stdout=${Buffer.byteLength(res.out, 'utf8')}B 正文=${Buffer.byteLength(payload, 'utf8')}B`);
 
       if (!res.ok || !payload) {
@@ -932,11 +1451,174 @@ async function main() {
     return 0;
   }
 
+  // 陈旧告警判定自检：喂几组「数据多旧 + 上次告警什么时候」的样本，打印判定（不联网、不打扰群）
+  if (mode === '--stale-selftest') {
+    const st = cfg.alerts?.stale ?? {};
+    console.log(
+      `策略：enabled=${st.enabled !== false}　陈旧线=${st.afterMinutes ?? 30} 分钟　冷却=${st.cooldownMinutes ?? 180} 分钟　dryRun=${st.dryRun === true}`,
+    );
+    console.log(`推送目标：${(st.chats ?? []).join(', ') || '（空 = 只写日志，不推群）'}`);
+    const now = Date.now();
+    const hoursAgo = (h) => now - h * 3600 * 1000;
+    const cases = [
+      ['刚采到（1 分钟前）', 1, 0],
+      ['踩在线上（29 分钟前）', 29, 0],
+      ['刚过线（31 分钟前），没推过', 31, 0],
+      ['过线，2 小时前推过（冷却中）', 31, hoursAgo(2)],
+      ['过线，4 小时前推过（冷却已过）', 31, hoursAgo(4)],
+      ['从来没有采集成功过', Number.POSITIVE_INFINITY, 0],
+    ];
+    for (const [name, age, lastAt] of cases) {
+      const d = staleDecision('demo', age, st, lastAt, now);
+      console.log(`  ${d.alert ? '★ 会告警' : '　不告警'}  ${name.padEnd(30)} ${d.reason}`);
+    }
+    return 0;
+  }
+
+  // 陈旧告警**真身**预演：拿当前真实的快照文件跑判定与文案，打印"会推什么"（不推群）
+  // 与守护进程共用 staleReport()，所以这里看到的就是线上会推的那一份。
+  if (mode === '--stale-check') {
+    const st = cfg.alerts?.stale ?? {};
+    const chats = (st.chats ?? []).map(String).filter(Boolean);
+    console.log(
+      `策略：enabled=${st.enabled !== false}　陈旧线=${st.afterMinutes ?? 30} 分钟　冷却=${st.cooldownMinutes ?? 180} 分钟　dryRun=${st.dryRun === true}`,
+    );
+    console.log(`推送目标：${chats.join(', ') || '（空 = 只写日志，不推群）'}`);
+    const rows = staleReport(cfg);
+    if (!rows.length) {
+      console.log('（没有任何命令配 snapshot，无从判定）');
+      return 0;
+    }
+    let need = 0;
+    for (const r of rows) {
+      const age = Number.isFinite(r.ageMin) ? `${Math.round(r.ageMin)} 分钟` : '从未成功';
+      console.log(
+        `  ${r.dec.alert ? '★ 会告警' : '　不告警'}  ${String(r.cmd.snapshot).padEnd(16)} 数据时间 ${dataTimeText(r.snap)}（${age}）— ${r.dec.reason}`,
+      );
+      if (r.dec.alert) {
+        need += 1;
+        console.log('      ── 会推送的正文（本命令只打印，不推）──');
+        for (const line of r.text.split('\n')) console.log(`      ${line}`);
+      }
+    }
+    console.log(need ? `结论：${need} 个源此刻会触发告警` : '结论：没有源需要告警');
+    return 0;
+  }
+
   if (mode === '--list') {
     for (const c of cfg.commands) {
       console.log(`${c.enabled === false ? '[停用] ' : ''}${c.id.padEnd(16)} ${c.match.join(' / ').padEnd(28)} ${c.label}`);
     }
     return 0;
+  }
+
+  if (mode === '--collect') {
+    const only = argv.slice(1).find((a) => !a.startsWith('--')) ?? '';
+    return collect(cfg, only);
+  }
+
+  // 历史留档回看（P2「可补采」）：某天每轮采到了什么、有没有空档
+  if (mode === '--history') {
+    const rest = argv.slice(1);
+    const di = rest.indexOf('--date');
+    const day = di >= 0 ? String(rest[di + 1] ?? '').trim() : localDay(Date.now());
+    const only = rest.find((a, i) => !a.startsWith('--') && !(di >= 0 && i === di + 1)) ?? '';
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+      console.log('用法：--history [源/命令] [--date YYYY-MM-DD]（不写日期＝今天）');
+      return 1;
+    }
+    const sources = [
+      ...new Set(
+        cfg.commands
+          .filter(
+            (c) =>
+              c.enabled !== false &&
+              c.snapshot &&
+              (!only || c.snapshot === only || c.id === only || (c.match ?? []).includes(only)),
+          )
+          .map((c) => c.snapshot),
+      ),
+    ];
+    if (!sources.length) {
+      console.log(only ? `没有匹配「${only}」的快照源` : '没有配 snapshot 的命令');
+      return 1;
+    }
+    const every = Number(cfg.collect?.everyMinutes ?? 10);
+    const keep = cfg.history?.keepDays ?? 14;
+    const limitMin = every * Number(cfg.history?.graceFactor ?? 2.5);
+    console.log(`历史留档 ${day}　采集周期 ${every} 分钟｜保留 ${keep} 天｜空档判定＝相邻两次成功间隔 > ${limitMin} 分钟`);
+    for (const s of sources) {
+      const recs = readHistory(s, day);
+      const st = historyStats(recs, every, cfg.history?.graceFactor);
+      console.log(
+        `\n=== ${s}　${st.okRounds}/${st.rounds} 轮成功${st.failRounds ? `、${st.failRounds} 轮失败` : ''}` +
+          `${st.longestGapMin ? `　最长空档 ${st.longestGapMin} 分钟` : ''} ===`,
+      );
+      if (!recs.length) {
+        console.log('  （这天没有记录）');
+        continue;
+      }
+      const show = recs.slice(-30);
+      for (const r of show) {
+        const preview = String(r.markdown ?? '')
+          .split('\n')
+          .map((x) => x.trim())
+          .filter(Boolean)
+          .slice(0, 2)
+          .join(' ｜ ')
+          .slice(0, 110);
+        const tail = preview || String(r.error ?? '').replace(/\n/g, ' ').slice(0, 90) || '(无正文)';
+        console.log(`  ${hhmm(Date.parse(r.at))}　${r.ok ? '成功' : '失败'}　${tail}`);
+      }
+      if (recs.length > show.length) console.log(`  …（这天共 ${recs.length} 条，只列最近 ${show.length} 条）`);
+      if (st.gaps.length) {
+        console.log(`  空档：${st.gaps.map((g) => `${hhmm(g.from)}→${hhmm(g.to)}（${g.minutes} 分钟）`).join('，')}`);
+      }
+    }
+    return 0;
+  }
+
+  // 离线预演群内查询：走与 serve 完全相同的「读缓存 → 按群裁剪 → 加数据时间」路径，只打印。
+  // 存在的意义：验收「查询改读缓存」时不必真的去群里问一句（也就不会打扰同事）。
+  if (mode === '--query') {
+    const rest = argv.slice(1);
+    const gi = rest.indexOf('--as-group');
+    const asGroup = gi >= 0 ? String(rest[gi + 1] ?? '').trim() : '';
+    const filter = rest.find((a, i) => !a.startsWith('--') && !(gi >= 0 && i === gi + 1)) ?? '';
+    if (!filter) {
+      console.log('用法：--query <命令> [--as-group <群ID>]');
+      return 1;
+    }
+    const chatId = asGroup || (cfg.allowedUsers ?? ['dm'])[0];
+    const chattype = asGroup ? 'group' : 'direct';
+    const hit = resolveCommand(filter, cfg, chatId, chattype);
+    if (!hit?.cmd) {
+      console.log(hit?.ambiguous ? `通用别名在本会话不唯一：${hit.ambiguous.map((c) => c.match[0]).join(' / ')}` : `没有匹配「${filter}」的命令`);
+      return 1;
+    }
+    const cmd = hit.cmd;
+    if (asGroup) {
+      const info = cfg.groups?.[asGroup];
+      console.log(info ? `群视角：${info.name}（本群作用域 ${groupScope(info).join('/') || '未设'}）` : `群视角：${asGroup}（⚠ 不在 cfg.groups 里，不会裁剪）`);
+    }
+    const t0 = Date.now();
+    const cached = snapshotPayload(cmd, cfg);
+    let body;
+    let origin;
+    if (cached) {
+      body = applyBrandScope(cached.markdown, cmd, cfg, chatId, chattype);
+      origin = `读缓存 ${cmd.snapshot}（${humanAge(cached.ageMin)}）`;
+    } else {
+      const r = await runCommand(cmd);
+      body = applyBrandScope(extractPayload(cmd, r.out), cmd, cfg, chatId, chattype);
+      origin = `现场抓取 exit=${r.code} 耗时=${(r.ms / 1000).toFixed(1)}s`;
+    }
+    const head = cached ? freshnessLine(cached.snap, cmd, cfg) : cmd.snapshot ? liveFreshnessLine() : '';
+    const payload = [head, body].filter(Boolean).join('\n\n');
+    console.log('─'.repeat(64));
+    console.log(`# ${cmd.label}（${cmd.id}）　${origin}　端到端=${Date.now() - t0}ms`);
+    console.log(payload || '(正文为空)');
+    return payload ? 0 : 1;
   }
 
   if (mode === '--check') {
@@ -952,6 +1634,29 @@ async function main() {
       console.log(`群绑定     : ${g.name} = ${id}　作用域 ${groupScope(g).join('/') || '未设（不裁剪，看到全部）'}`);
     }
     console.log(`命令数     : ${cfg.commands.filter((c) => c.enabled !== false).length} 条可用`);
+
+    // 缓存状态：验收「查询＝读采集结果」时先看这里 —— 一眼看出有没有数据、数据多旧
+    const cached = cfg.commands.filter((c) => c.enabled !== false && c.snapshot);
+    if (cached.length) {
+      const { stale, maxAge } = snapshotLimits(null, cfg);
+      console.log(`缓存策略   : 陈旧线 ${stale} 分钟（只提示）｜过期线 ${maxAge} 分钟（超了回退现场抓取）`);
+      const sa = cfg.alerts?.stale ?? {};
+      console.log(
+        `陈旧告警   : ${sa.enabled === false ? '关闭' : `开启（>${sa.afterMinutes ?? 30} 分钟未更新即推，冷却 ${sa.cooldownMinutes ?? 180} 分钟）`}` +
+          `　推送目标：${(sa.chats ?? []).join(', ') || '（空 = 只写日志）'}${sa.dryRun === true ? '　[dryRun]' : ''}`,
+      );
+      for (const c of cached) {
+        const snap = readSnapshot(c.snapshot);
+        console.log(
+          `缓存       : ${c.snapshot} ← ${c.id}　` +
+            (snap
+              ? `${snap.ok ? '最近一次成功' : `最近一次失败（连续 ${snap.fails ?? '?'} 次）`}，数据时间 ${dataTimeText(snap)}`
+              : '还没有数据 → 先跑 --collect'),
+        );
+      }
+    } else {
+      console.log('缓存       : （没有命令配 snapshot，全部走现场抓取）');
+    }
 
     // 护栏：对所有人开放时，安全边界就从「谁能用」移到了「命令表里有什么」。
     // 这里只提示（不是错误）。注意启发式的天然局限：有的脚本用「不带 --send」表示预演，

@@ -3,7 +3,8 @@
     "复制成本目录下的 commands.json 再改（程序优先读 commands.json，没有才回退到这个示例）。",
     "真正要改的就四处：botId、allowedUsers、allowedChats+groups、commands。",
     "Windows 路径在 JSON 里必须写双反斜杠，例如 D:\\\\scripts\\\\query.py",
-    "本文件里的值全是占位符：直接启动只会告诉你配置缺失，不会误连任何真实机器人。"
+    "本文件里的值全是占位符：直接启动只会告诉你配置缺失，不会误连任何真实机器人。",
+    "想让查询走「读采集结果」而不是每次现场抓：给命令加 snapshot 字段，并配好 collect / freshness / history / alerts.stale 四块（见 references/11）。"
   ],
   "botId": "填企微后台『智能机器人』的 botId，形如 aibXXXXXXXXXXXXXXXXXXXXXXXX",
   "secretEnv": "WECOM_FASTLANE_SECRET",
@@ -18,10 +19,62 @@
   },
   "_路径变量说明": "cwd/exe/args 里可以用 ${HERE}（通道目录）、${DSH_HOME}、或任意环境变量名如 ${PYTHON_EXE}；这样换台机器不用改配置",
   "_scope说明": "scope 是任意维度值（品牌/渠道/区域/账号）；群 scope 为空＝该群不裁剪、看到全部。老写法 brands 等价于 scope",
+  "collect": {
+    "_说明": [
+      "内置采集器（references/11）：守护进程每 everyMinutes 分钟把所有带 snapshot 的命令跑一遍，",
+      "把「只打印」模式产出的正文写进 snapshots\\<源名>.json，群内查询就直接读它 —— 毫秒返回、平台挂了也能答。",
+      "为什么挂在守护进程里而不是计划任务：注册计划任务要管理员权限，而守护进程本来就常驻。",
+      "想改成系统计划任务：enabled 设 false，再右键以管理员身份运行 assets\\注册采集任务.cmd。"
+    ],
+    "enabled": true,
+    "everyMinutes": 10,
+    "startDelaySeconds": 30
+  },
+  "freshness": {
+    "_说明": [
+      "新鲜度策略（配合命令上的 snapshot 字段）：staleMinutes 超过就在正文里加一行「⚠️ 数据已 N 分钟未更新」；",
+      "maxAgeMinutes 超过就不再用缓存、回退现场抓取（防止采集器死掉后一直拿旧数据当新数据答）。",
+      "每条命令可以用同名小写字段单独覆盖。"
+    ],
+    "staleMinutes": 30,
+    "maxAgeMinutes": 180
+  },
+  "history": {
+    "_说明": [
+      "历史留档（references/11）：每轮采集往 history\\<源>\\<日期>.jsonl 追加一条，",
+      "这样快照被覆盖、机器停过几小时，事后的数据也回看得见（--history [源] [--date 日期]）。",
+      "边界：平台一般不给历史查询，所以这是「本地留档 + 空档可见」，不是回平台把中间的数据补出来。",
+      "keepDays 之后的历史文件每轮采集后自动清理；graceFactor 是空档判定倍数（相邻两次成功 > 周期×倍数算空档）。"
+    ],
+    "enabled": true,
+    "keepDays": 14,
+    "graceFactor": 2.5
+  },
+  "alerts": {
+    "_说明": "连续失败告警：同一命令连续失败 N 次就主动往出事的那条会话推一条提醒；冷却期内不重复；成功一次即清零。dryRun=true 时只写日志不打扰群。",
+    "enabled": true,
+    "consecutiveFailures": 3,
+    "cooldownMinutes": 60,
+    "dryRun": false,
+    "stale": {
+      "_说明": [
+        "采集陈旧告警：每轮采集结束后检查各源的数据时间，超过 afterMinutes 还没有新数据（或从来没成功过）就主动推一条。",
+        "chats 是推送目标 —— 建议只推运维群/自己的群，别把技术故障推进业务群；留空＝只写日志不推。",
+        "dryRun=true 时只写日志；--stale-selftest 可以离线验证判定，不发群。"
+      ],
+      "enabled": true,
+      "afterMinutes": 30,
+      "cooldownMinutes": 180,
+      "chats": ["填一个运维群的群ID（或留空＝只写日志）"],
+      "dryRun": false
+    }
+  },
   "commands": [
     {
       "id": "example-balance",
       "label": "账户余额",
+      "snapshot": "example-balance",
+      "_snapshot说明": "有这一行＝这条命令走「读采集结果」：查询读 snapshots\\example-balance.json（毫秒），采集器每 10 分钟刷新它。读不到或数据超过 freshness.maxAgeMinutes 会自动回退现场抓取，所以它只加速与兜底，不会让查询答不出来。",
       "match": ["余额", "查余额"],
       "generic": [],
       "chats": [],
@@ -40,7 +93,7 @@
       "label": "A 品牌门店营业情况",
       "match": ["A品牌门店"],
       "generic": ["门店", "营业"],
-      "_说明": "generic 是通用别名：只有在本会话里唯一指向一条命令时才生效 → 各群说『门店』各自出本群品牌",
+      "_说明": "generic 是通用别名：只有在本会话里唯一指向一条命令时才生效 → 各群说『门店』各自出本群品牌。这条故意不配 snapshot，用来说明「可以一条一条地上」",
       "chats": ["把A品牌群ID填这里"],
       "cwd": "D:\\你的脚本目录",
       "exe": "D:\\你的Python\\python.exe",
