@@ -185,11 +185,14 @@ wecom-zero-token-query/
 │   ├── watchdog-hidden.vbs       计划任务入口（wscript，不闪窗）
 │   ├── collect-hidden.vbs        采集器计划任务入口（**可选**：默认采集器跑在守护进程里）
 │   ├── register-collect-task.ps1 + 注册采集任务.cmd   想把采集改成系统计划任务时的入口（需管理员，同上）
+│   ├── webhook_key.py            webhook key 的唯一读取入口（多个脚本共用一把 key 时用，见 09 §4.1）
+│   ├── check_webhook_keys.py     自检：证明"key 只在一处"（扫描目录，点名还在写明文 key 的文件）
 │   └── _preview_check.py         回归测试：证明"preview 绝不偷推"
 ├── references/                   12 份文档，索引见 §6
 ├── examples/                     三个可跑样板适配器（A 正式 API / B 私有接口 / C 导出文件）+ README
 ├── tests/test_adapters.py        10 条断言级回归（契约 5 + 逻辑 4 + 失败路径 1）
 ├── tests/test_cache_layer.py     15 条断言级回归（采集/缓存/陈旧告警/历史留档；沙箱跑真程序，不联网不发群）
+├── tests/test_webhook_keys.py    13 条断言级回归（key 读取契约 + 自检脚本真的能发现问题；用假 UUID，不联网）
 ├── scripts/                      install.ps1 一键安装 · probe-env.ps1 环境探测 · pack.ps1 干净打包
 ├── VERSION / CHANGELOG.md        版本号与变更记录（打包脚本读 VERSION）
 └── docs/标准操作手册.md/.docx      给「没有 Python 基础的人」看的逐步手册（可直接转发）
@@ -208,7 +211,7 @@ wecom-zero-token-query/
 | `references/06-安全与边界.md` | 开放给同事前必须想清楚的事 |
 | `references/07-取数路径.md` | **遇到一个新数据平台**：五类平台的选路决策树与配方 |
 | `references/08-脚本接入契约与探针.md` | **要接入一个脚本**：四条契约 + `--probe` 探针用法 |
-| `references/09-本地化部署.md` | **换台机器部署**：环境探测、变量路径、凭据、离线、升级回滚 |
+| `references/09-本地化部署.md` | **换台机器部署**：环境探测、变量路径、凭据、多脚本共用 key 的收拢（§4.1）、离线、升级回滚 |
 | `references/10-泛化模型与作用域.md` | 把"品牌"泛化成任意维度（渠道/区域/账号）；多租户闸门 |
 | `references/11-采集与缓存.md` | **查询慢 / 想让平台挂了也能答**：查询改读采集结果（快照 + 数据时间 + 陈旧告警 + 历史留档），每条命令只加一个 `snapshot` 字段 |
 | `docs/标准操作手册.md` | 给最终使用者（非技术人员）的逐步手册，可直接转发 |
@@ -231,5 +234,7 @@ wecom-zero-token-query/
 - [ ] 破坏性演练做过一次：把某条命令的 `exe` 指向不存在的路径 + 把快照数据时间伪造成 2 小时前
       → 期望「采集如实报失败 + 陈旧告警到群 + 查询仍毫秒返回旧数据并带陈旧提示」
 - [ ] 体检里有采集与缓存项（每条源的「数据时间 + 年龄 + 今日留档 N/M 轮成功」）
-- [ ] `python -m unittest discover -s tests` 全绿（改了样板或缓存层就跑）
+- [ ] 多个脚本/播报共用同一把 webhook key 时，key 只在**一处**（`webhooks.json`），
+      且 `python assets\check_webhook_keys.py <业务目录>` 全过（它会点名还在写明文 key 的文件）
+- [ ] `python -m unittest discover -s tests` 全绿（改了样板、缓存层或 key 模块就跑）
 - [ ] 明确告知用户：能力上限 = 放进命令表的只读脚本；secret 不要外发
