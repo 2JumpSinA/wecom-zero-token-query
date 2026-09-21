@@ -193,9 +193,12 @@ wecom-zero-token-query/
 ├── tests/test_adapters.py        10 条断言级回归（契约 5 + 逻辑 4 + 失败路径 1）
 ├── tests/test_cache_layer.py     15 条断言级回归（采集/缓存/陈旧告警/历史留档；沙箱跑真程序，不联网不发群）
 ├── tests/test_webhook_keys.py    13 条断言级回归（key 读取契约 + 自检脚本真的能发现问题；用假 UUID，不联网）
+├── tests/test_manual_docx.py     4 条断言级回归（手册 docx 生成：标题样式 / 表格不掉行 / 生成物声明；需要 python-docx）
 ├── scripts/                      install.ps1 一键安装 · probe-env.ps1 环境探测 · pack.ps1 干净打包
+│                                 build_manual_docx.py 手册 md → docx（纯 python-docx，不依赖 pandoc）
 ├── VERSION / CHANGELOG.md        版本号与变更记录（打包脚本读 VERSION）
 └── docs/标准操作手册.md/.docx      给「没有 Python 基础的人」看的逐步手册（可直接转发）
+                                  ⚠️ .docx 是**生成物**：改内容请改 .md，再跑 `scripts/build_manual_docx.py`
 ```
 
 ## 6. 参考文档索引
