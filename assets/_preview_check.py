@@ -14,7 +14,7 @@ import requests  # noqa: E402
 calls = []
 requests.post = lambda *a, **k: (calls.append(a), (_ for _ in ()).throw(AssertionError("真实 HTTP 推送被触发"))) [0]
 
-import wecom_cancel_ratio_bot as bot  # noqa: E402
+import <你的脚本模块名> as bot  # noqa: E402   ← 改成你要验证的那个模块
 
 fails = []
 
@@ -48,7 +48,7 @@ check("非 preview 仍走真实推送", real_path_ok and len(calls) == 1, f"call
 
 # 3) push_shops 在 preview 下不写「今天已推」（否则会顶掉 09:00 的定时播报）
 bot.PREVIEW = True
-bot.build_shop_md = lambda cfg: "### 门店营业情况播报\n> 项目：测试\n门店营业情况（美团）：营业中 1 家"
+bot.build_shop_md = lambda cfg: "### 门店营业情况播报\n> 项目：测试\n门店营业情况（平台A）：营业中 1 家"
 before = state_of(bot.SHOP_STATE_FILE)
 md = bot.push_shops({"wecom_webhook_key": "DUMMY_KEY"})
 after = state_of(bot.SHOP_STATE_FILE)

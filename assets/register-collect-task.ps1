@@ -1,4 +1,4 @@
-# Register the WecomCollect scheduled task = run "fastlane.mjs --collect" every
+﻿# Register the WecomCollect scheduled task = run "fastlane.mjs --collect" every
 # 10 minutes with no console window (via collect-hidden.vbs).
 #
 # WHY THIS FILE EXISTS BUT IS NOT THE DEFAULT
@@ -24,7 +24,9 @@ $ErrorActionPreference = 'Stop'
 
 $taskName = 'WecomCollect'
 $template = 'WecomFastlane'
-$root = 'D:\dsh-app\wecom-fastlane'
+# 本脚本与 collect-hidden.vbs 同在部署目录里（install.ps1 会把 assets\ 整个拷过去），
+# 所以目录从脚本自身位置推导 —— 换机器、换目录都不用改这一行。
+$root = $PSScriptRoot
 $vbs = Join-Path $root 'collect-hidden.vbs'
 
 # 1) elevation: a task in the root folder cannot be registered unelevated

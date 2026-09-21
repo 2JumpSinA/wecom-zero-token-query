@@ -3,6 +3,29 @@
 本技能按"取数层 / 通道层 / 部署层"三层组织（见 `references/00-架构总览.md`）。
 版本号在 `VERSION` 文件里；打包用 `scripts/pack.ps1`（会自动排除 logs/、__pycache__、.git 等）。
 
+## v2.3.2 — 发布前审查（脱敏 + 两个真 bug）
+
+发布前按"这份东西要交给外部的人"重新审了一遍，抓到这些：
+
+**脱敏**
+- `scripts/pack.ps1` 的默认输出目录写的是本机路径 → 改成仓库的上一级目录
+- `assets/register-collect-task.ps1` 的部署目录硬编码本机路径 → 改成从脚本自身位置推导（`$PSScriptRoot`）
+- `references/10` 与 `assets/_preview_check.py` 里的平台名 → 改成「平台A / 平台B」，与手册的脱敏约定一致
+- 手册里的产品名改中性（不再点名某个具体的 agent 工具）
+- 手册与 `_preview_check.py` 里的示例脚本名换成通用名 / 占位符
+  （**写变更记录时要注意**：上面两条刻意不把原词写出来 —— 脱敏记录本身也是一份会被分发出去的文件）
+
+**两个真 bug（都是这次审查抓出来的）**
+- `scripts/pack.ps1` **缺 UTF-8 BOM**（同目录另两个 `.ps1` 都有）：Windows PowerShell 5.1 按 GBK
+  解码中文注释会破坏语法，而且**报错位置漂到几十行之后**，极难排查。补 BOM 后正常。
+- `pack.ps1` 的输出目录默认值调整后，zip 落进了仓库目录 → **打包脚本把上一个包打进了新包**
+  （文件数 43→44 就是它）。已删掉误落的 zip，并把 `*.zip` 加进排除规则（文件计数同步修正）。
+
+**新增测试**
+- `tests/test_scripts_encoding.py`：**3 条断言级回归** —— 含中文的 `.ps1`/`.vbs` 必须带 BOM、
+  `.cmd`/`.bat` 必须纯 ASCII。这个坑在真实项目里踩过两次（`health.ps1`、`pack.ps1`），值得让机器盯着。
+- 全套 **45 条**测试通过（原 42 + 新 3）
+
 ## v2.3.1 — 操作手册 docx 重新生成（并留下生成脚本）
 
 - 新增 `scripts/build_manual_docx.py`：把 `docs/标准操作手册.md` 转成 `.docx`。
