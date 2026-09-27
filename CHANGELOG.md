@@ -3,6 +3,26 @@
 本技能按"取数层 / 通道层 / 部署层"三层组织（见 `references/00-架构总览.md`）。
 版本号在 `VERSION` 文件里；打包用 `scripts/pack.ps1`（会自动排除 logs/、__pycache__、.git 等）。
 
+## v2.3.6 — README 拆成英文默认 + 中文单文件（GitHub 惯例）
+
+由来：v2.3.4 把双语塞进了同一个 `README.md`（392 行，中文在上、英文在下）。
+对**全球社区**来说这有两个问题：GitHub 首页默认渲染的是中文，
+非中文读者第一眼看到的是看不懂的语言；而且文件长度翻倍，
+`grep` / 目录导航 / 翻译工具都更难用。
+
+**做了什么**
+
+- `README.md` 改为**英文**（全球社区惯例：默认分支的 README 用英文），
+  顶部一行 `English · [中文](README.zh-CN.md)` 切换；
+- 新增 `README.zh-CN.md`：中文全文，顶部一行 `中文 · [English](README.md)` 切换；
+- 两份都保留 CI 徽章与版本号；正文里的 `references/…`、`examples/…` 等相对链接**不变**，
+  拆文件不影响任何内部链接（已确认全仓库没有文件通过 `README.md#anchor` 引用本文件）；
+- 版本号同步为 v2.3.6。
+
+**为什么不是 `README.en.md`**：GitHub/GitLab 上英文读者占多数，
+默认文件是英文属于社区惯例；中文读者从英文版点一次就到，
+反过来则会让多数读者先撞上一次语言墙。
+
 ## v2.3.5 — 修掉「零依赖跑不通」：requests 改懒加载 + CI 常绿
 
 由来：外部读者克隆下来跑 `python -m unittest discover -s tests`，会看到 **18 条红的**。
