@@ -1,7 +1,7 @@
 <a id="zh"></a>
 # 企微「零 Token 数据查询」直调通道 · 技能包
 
-**中文** · [English](#en) · v2.3.3 · [MIT](LICENSE)
+[![tests](https://github.com/2JumpSinA/wecom-zero-token-query/actions/workflows/tests.yml/badge.svg)](https://github.com/2JumpSinA/wecom-zero-token-query/actions/workflows/tests.yml) · **中文** · [English](#en) · v2.3.5 · [MIT](LICENSE)
 
 把「固定几类数据查询」做成企业微信里的**零 token 直调入口**：
 群里 @机器人 发命令 → 本机脚本直接取数 → 结果回到那条消息。
@@ -234,7 +234,7 @@ MIT © 2026 2JumpSinA
 <a id="en"></a>
 # WeCom "Zero-Token" Query Lane · a skill package
 
-**English** · [中文](#zh) · v2.3.3 · [MIT](LICENSE)
+[![tests](https://github.com/2JumpSinA/wecom-zero-token-query/actions/workflows/tests.yml/badge.svg)](https://github.com/2JumpSinA/wecom-zero-token-query/actions/workflows/tests.yml) · **English** · [中文](#zh) · v2.3.5 · [MIT](LICENSE)
 
 Turn a handful of fixed data lookups into a **zero-token query lane** inside WeCom:
 `@bot <command>` in a group → a local script fetches the data → the result lands in that same message.
