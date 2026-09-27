@@ -44,21 +44,25 @@ jobs:
 
       - name: 不装任何依赖，直接跑 --demo
         shell: pwsh
+        env:
+          # 与通道保持一致：assets/fastlane.mjs 与 run-fastlane.cmd 都以这套环境变量跑脚本。
+          # 少了这两行，英文 locale 的 runner 上 stdout 是 cp1252，中文输出直接 UnicodeEncodeError。
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
         run: |
           $failed = $false
           foreach ($f in @('adapter-api.py', 'adapter-private-api.py', 'adapter-export-file.py')) {
             $out = python "examples/$f" --demo 2>&1
+            $code = $LASTEXITCODE
             $text = $out -join "`n"
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "::error::$f --demo 退出码 $LASTEXITCODE（离线路径不该依赖第三方库）"
-              $failed = $true
-            }
-            if (-not $text.Contains('====================')) {
-              Write-Host "::error::$f 未输出契约分隔线 ===="
-              $failed = $true
-            }
-            if (-not $text.Contains('### ')) {
-              Write-Host "::error::$f 正文缺少 ### 标题"
+            $sep = $text.Contains('====================')
+            $hdr = $text.Contains('### ')
+            Write-Host "$f exit=$code sep=$sep head=$hdr"
+            if ($code -ne 0 -or -not $sep -or -not $hdr) {
+              Write-Host "::error::$f 的 --demo 检查未通过（离线路径不该依赖第三方库）"
+              Write-Host "----- $f 输出 -----"
+              Write-Host $text
+              Write-Host "-------------------"
               $failed = $true
             }
           }

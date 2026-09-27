@@ -30,6 +30,13 @@
   专门钉住「零依赖也能跑通」这条承诺。
 - README 中英双语各加一节「开发与测试 / Development and testing」。
 
+**CI 首跑抓到的第一个问题（已修）**：`demo-without-deps` 那条 job 第一次是红的 ——
+不是适配器的问题，而是这条 job **忘了对齐通道的运行环境**：英文 locale 的 runner 上
+Python 的 stdout 是 cp1252，打印中文直接 `UnicodeEncodeError`（本机用
+`PYTHONIOENCODING=cp1252` 精确复现过）。而 `assets/fastlane.mjs` 与 `run-fastlane.cmd`
+本来就以 `PYTHONUTF8=1` / `PYTHONIOENCODING=utf-8` 跑脚本 —— 通道侧一直是对的。
+补上这两个环境变量后本地复现通过；同时让该 job 在失败时把脚本输出打进日志，下次不用再猜。
+
 ## v2.3.4 — README 中英双语化：把架构、契约与运维写进首页
 
 由来：README 是外部读者的第一入口，而此前**英文只有「与相近项目的区别」一节** ——
