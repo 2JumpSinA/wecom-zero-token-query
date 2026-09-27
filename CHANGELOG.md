@@ -3,6 +3,33 @@
 本技能按"取数层 / 通道层 / 部署层"三层组织（见 `references/00-架构总览.md`）。
 版本号在 `VERSION` 文件里；打包用 `scripts/pack.ps1`（会自动排除 logs/、__pycache__、.git 等）。
 
+## v2.3.5 — 修掉「零依赖跑不通」：requests 改懒加载 + CI 常绿
+
+由来：外部读者克隆下来跑 `python -m unittest discover -s tests`，会看到 **18 条红的**。
+根因不是代码逻辑，而是两个样板适配器在**模块顶层**就要求 `requests` ——
+`--demo` 明明是「不联网、先打通链路」的路径，却因为一个用不到的第三方库直接退出码 2；
+而采集与缓存层的测试又复用 `examples/adapter-api.py --demo`，于是 5 条也一起红。
+这把 `examples/README.md` 里「三个样板都能离线跑」的承诺打穿了。
+
+**修法**（不是把测试改成 skip，而是把承诺补上）：
+
+- **`requests` 改懒加载**：`adapter-api.py` / `adapter-private-api.py` 只在**真发请求**时才导入它；
+  `--demo`（以及 `--set-token`）全程离线，只装 Python 就能跑通。
+- **凭据校验前移**：`adapter-private-api.py` 抽出 `missing_credentials_reason()`，
+  在建立 HTTP 会话**之前**判定登录态是否齐备 —— 没装 `requests` 时也能给出真正的失败原因
+  （缺凭据），而不是被 ImportError 盖掉。`test_missing_credentials_fails_loudly` 就是钉这条的。
+- 结果：**零第三方依赖时 46 条测试 0 失败**（4 条 docx 相关 skip）；
+  装上开发依赖后 **46 条全过、0 skip**。
+
+**新增**
+
+- `requirements-dev.txt`：声明开发/测试依赖（requests / python-docx），并写明运行时不依赖它们。
+- `.github/workflows/tests.yml`：两个 job ——
+  ① 完整套件（windows-latest × Python 3.11/3.13，带 Node 以启用采集与缓存层测试）；
+  ② **故意什么都不装**，只跑三个适配器的 `--demo` 并校验契约分隔线与 `###` 标题，
+  专门钉住「零依赖也能跑通」这条承诺。
+- README 中英双语各加一节「开发与测试 / Development and testing」。
+
 ## v2.3.4 — README 中英双语化：把架构、契约与运维写进首页
 
 由来：README 是外部读者的第一入口，而此前**英文只有「与相近项目的区别」一节** ——

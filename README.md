@@ -214,6 +214,18 @@ LICENSE                       MIT
 | `references/11-采集与缓存.md` | 让查询变快、平台挂了仍答得出 |
 | `docs/标准操作手册.md/.docx` | 给没有 Python 基础的同事，可整份转发 |
 
+## 开发与测试
+
+```bash
+python -m pip install -r requirements-dev.txt      # 只在开发/测试时需要
+python -m unittest discover -s tests -v            # 46 条断言级回归
+```
+
+- **零第三方依赖也能跑通 `--demo`**：三个样板适配器的离线路径不导入 `requests`，
+  只装 Python 就能把链路打通。CI 里有一条 job **故意什么都不装**，专门钉住这条承诺。
+- 通道层（`assets/fastlane.mjs`）是 Node 写的，所以采集与缓存层的测试需要 Node；没有 Node 会自动 skip。
+- CI：GitHub Actions 在 `windows-latest` 上跑 Python 3.11 / 3.13（见 `.github/workflows/tests.yml`）。
+
 ## 许可
 
 MIT © 2026 2JumpSinA
@@ -452,6 +464,20 @@ so you can prove the whole path end to end before touching credentials or endpoi
 | `references/10-泛化模型与作用域.md` | Brand / channel / region / account are all just dimension values |
 | `references/11-采集与缓存.md` | Making queries fast and answerable while the platform is down |
 | `docs/标准操作手册.md/.docx` | For colleagues with no Python background — forward it as a whole |
+
+## Development and testing
+
+```bash
+python -m pip install -r requirements-dev.txt      # development / testing only
+python -m unittest discover -s tests -v            # 46 assertion-level regressions
+```
+
+- **`--demo` works with zero third-party dependencies**: the offline path of all three sample
+  adapters never imports `requests`, so a plain Python install is enough to prove the whole path.
+  One CI job deliberately installs **nothing** to keep that promise honest.
+- The channel layer (`assets/fastlane.mjs`) is Node, so the collection/cache tests need Node;
+  without it they skip themselves.
+- CI: GitHub Actions on `windows-latest` with Python 3.11 / 3.13 (see `.github/workflows/tests.yml`).
 
 ## License
 

@@ -25,11 +25,22 @@ import sys
 import time
 from datetime import datetime, timedelta
 
-try:
-    import requests
-except ImportError:
-    print("需要 requests：pip install requests", file=sys.stderr)
-    sys.exit(2)
+# requests 只在**真发请求**时才需要：--demo 全程离线，没装第三方库也能跑通链路。
+# 所以不做模块级强依赖，改成用到时再加载。
+requests = None
+
+
+def ensure_requests():
+    """懒加载 requests：只有联网路径才要求它（--demo 不需要）"""
+    global requests
+    if requests is None:
+        try:
+            import requests as _requests
+        except ImportError:
+            print("需要 requests：pip install requests（--demo 不需要）", file=sys.stderr)
+            sys.exit(2)
+        requests = _requests
+    return requests
 
 # ============================ TODO 1/4：站点与鉴权方式 ======================
 API_BASE = os.environ.get("MY_API_BASE", "https://api.example.com")
@@ -204,6 +215,7 @@ def main() -> int:
         else:
             if not APP_KEY or not APP_SECRET:
                 return fail("缺少凭据：请设置环境变量 MY_APP_KEY / MY_APP_SECRET")
+            ensure_requests()
             session = requests.Session()
             token = None if AUTH_MODE == "hmac" else get_access_token(session)
             print(f"[取数] {args.day} …")

@@ -1,0 +1,66 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # 完整测试套件（含需要 Node 的采集与缓存层、需要 python-docx 的手册生成校验）
+  test:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # 通道层 assets/fastlane.mjs 是 Node 写的：没有 node，缓存层测试会整体 skip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 安装开发依赖
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: 跑测试套件
+        run: python -m unittest discover -s tests -v
+
+  # 项目承诺：三个样板适配器的 --demo 离线路径**零第三方依赖**即可跑通。
+  # 这个 job 故意什么都不装，专门钉住这条承诺。
+  demo-without-deps:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 不装任何依赖，直接跑 --demo
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($f in @('adapter-api.py', 'adapter-private-api.py', 'adapter-export-file.py')) {
+            $out = python "examples/$f" --demo 2>&1
+            $text = $out -join "`n"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::$f --demo 退出码 $LASTEXITCODE（离线路径不该依赖第三方库）"
+              $failed = $true
+            }
+            if (-not $text.Contains('====================')) {
+              Write-Host "::error::$f 未输出契约分隔线 ===="
+              $failed = $true
+            }
+            if (-not $text.Contains('### ')) {
+              Write-Host "::error::$f 正文缺少 ### 标题"
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
+          Write-Host "三个样板适配器在零第三方依赖下均跑通 --demo ✓"

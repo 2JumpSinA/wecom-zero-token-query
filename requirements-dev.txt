@@ -1,0 +1,12 @@
+# 开发 / 测试依赖（安装：python -m pip install -r requirements-dev.txt）
+#
+# 重要：**运行时不依赖这些**。
+# 三个样板适配器的 --demo 离线路径、以及整套断言级测试，只用 Python 标准库即可跑通；
+# 下面这些只在「真发请求」「校验 docx 生成质量」这类开发动作里才需要。
+# 这条承诺由 CI 里那个「不装任何依赖就跑 --demo」的 job 钉住（见 .github/workflows/tests.yml）。
+
+requests>=2.31          # 样板适配器真发请求时才需要（--demo / --set-token 不需要）
+python-docx>=1.1        # tests/test_manual_docx.py：校验 docs/标准操作手册.docx 的生成质量
+
+# 可选：examples/adapter-export-file.py 读 .xlsx 导出文件时才需要（读 csv 不需要）
+# openpyxl>=3.1

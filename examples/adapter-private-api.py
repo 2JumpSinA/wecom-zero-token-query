@@ -24,11 +24,22 @@ import sys
 import time
 from datetime import datetime, timedelta
 
-try:
-    import requests
-except ImportError:
-    print("需要 requests：pip install requests", file=sys.stderr)
-    sys.exit(2)
+# requests 只在**真发请求**时才需要：--demo 全程离线，没装第三方库也能跑通链路。
+# 所以不做模块级强依赖，改成用到时再加载。
+requests = None
+
+
+def ensure_requests():
+    """懒加载 requests：只有联网路径才要求它（--demo / --set-token 不需要）"""
+    global requests
+    if requests is None:
+        try:
+            import requests as _requests
+        except ImportError:
+            print("需要 requests：pip install requests（--demo 不需要）", file=sys.stderr)
+            sys.exit(2)
+        requests = _requests
+    return requests
 
 # ============================ TODO 1/5：站点常量 ============================
 API_BASE = os.environ.get("MY_API_BASE", "https://api.example.com/pos")   # 抓包得到的接口前缀
@@ -138,7 +149,26 @@ def refresh_session(session, saved):
     return None
 
 
-def acquire_session(session: requests.Session) -> str:
+def missing_credentials_reason() -> str:
+    """
+    凭据 / 登录态是否齐备 —— 缺了返回「人话」原因，齐备返回空串。
+
+    单独抽出来是为了**在建立 HTTP 会话之前**就能判定：这一步不需要 requests，
+    所以没装第三方库时也能立刻给出真正的失败原因（缺凭据），
+    而不是先抛一个 ImportError 把原因盖掉。
+    """
+    cached = load_session()
+    if cached and cached.get("token"):
+        return ""
+    if os.environ.get(ENV_USER) and os.environ.get(ENV_PASS):
+        return ""
+    return (
+        f"没有可用登录态：请设置环境变量 {ENV_USER} / {ENV_PASS} 登录一次，"
+        f"或手动把 token 写进 {TOKEN_FILE}"
+    )
+
+
+def acquire_session(session: "requests.Session") -> str:
     """
     获取登录态。**优先复用缓存 token**，只在没有缓存时才登录一次。
 
@@ -156,10 +186,7 @@ def acquire_session(session: requests.Session) -> str:
 
     user, pwd = os.environ.get(ENV_USER), os.environ.get(ENV_PASS)
     if not (user and pwd):
-        raise RuntimeError(
-            f"没有可用登录态：请设置环境变量 {ENV_USER} / {ENV_PASS} 登录一次，"
-            f"或手动把 token 写进 {TOKEN_FILE}"
-        )
+        raise RuntimeError(missing_credentials_reason())
 
     print("[登录态] 缓存为空，执行一次账号登录（会挤掉网页端登录）")
     resp = session.post(
@@ -301,6 +328,7 @@ def main() -> int:
         print(f"[登录态] 已写入 {TOKEN_FILE}（有效期按 12 小时估算，过期再注入一次即可）")
         return 0
     if args.check_auth:
+        ensure_requests()
         session = requests.Session()
         token = acquire_session(session)
         try:
@@ -319,6 +347,10 @@ def main() -> int:
             print("[demo] 使用内置样例数据")
             rows = demo_rows()
         else:
+            reason = missing_credentials_reason()
+            if reason:
+                raise RuntimeError(reason)   # 契约 3：缺凭据也要给人话；这一步不需要 requests
+            ensure_requests()
             session = requests.Session()
             token = acquire_session(session)
             print(f"[取数] {args.day} …")
