@@ -46,7 +46,8 @@ def load_hooks(path: str | None = None) -> dict:
     """读配置文件的 hooks 段。"""
     p = path or hooks_file()
     try:
-        with open(p, "r", encoding="utf-8") as f:
+        # utf-8-sig：记事本 / PowerShell 5.1 写出的 UTF-8 会带 BOM，用 utf-8 读会 JSONDecodeError
+        with open(p, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
     except FileNotFoundError:
         raise HookConfigError(

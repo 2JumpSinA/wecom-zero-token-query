@@ -5,6 +5,7 @@
 - PREVIEW=True  时不应该有任何 HTTP 请求；
 - PREVIEW=False 时仍必须走真实推送路径（哨兵抛错即证明）。
 """
+import importlib
 import sys
 
 sys.path.insert(0, r"<你的脚本目录>")
@@ -14,7 +15,7 @@ import requests  # noqa: E402
 calls = []
 requests.post = lambda *a, **k: (calls.append(a), (_ for _ in ()).throw(AssertionError("真实 HTTP 推送被触发"))) [0]
 
-import <你的脚本模块名> as bot  # noqa: E402   ← 改成你要验证的那个模块
+bot = importlib.import_module("<你的脚本模块名>")  # noqa: E402   ← 改成你要验证的那个模块
 
 fails = []
 

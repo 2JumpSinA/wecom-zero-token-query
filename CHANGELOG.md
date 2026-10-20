@@ -3,6 +3,53 @@
 本技能按"取数层 / 通道层 / 部署层"三层组织（见 `references/00-架构总览.md`）。
 版本号在 `VERSION` 文件里；打包用 `scripts/pack.ps1`（会自动排除 logs/、__pycache__、.git 等）。
 
+## v2.3.7 — 三个线上韧性修复：字节截断 / 过期快照兜底 / 告警不依赖单链路
+
+由来：2026-10-20 对线上实例（本机部署目录）做整体审查，
+发现三个特定条件下会让用户「什么都拿不到」或告警静默丢失的实际缺口，全部修复：
+
+1. **回复截断按字符数算，不是字节数**（P0）
+   `payload.slice(0, MAX_REPLY_BYTES)` 按 UTF-16 字符数截，中文每字 3 字节（UTF-8），
+   20000 个中文字符最坏 ~60KB，截完仍超 SDK 20480B 上限 → 发送失败且只在日志可见。
+   实测对照：旧算法对 30000 个「数」字截后 60000B（超限），新算法 19998B ✓。
+   改为 `clipReplyBytes()`：直接在 Buffer 上裁，回退到完整 UTF-8 字符边界（不会切出半个字）。
+2. **缓存过期 + 现场抓取失败 = 用户什么都拿不到**（P0）
+   原行为：快照超过 `maxAgeMinutes`（默认 180 分）→ 弃用缓存走现场抓取 → 抓取失败 → 只回 ❌。
+   此时磁盘上明明还有旧快照。改为：配了 snapshot 的命令现场失败时，**回退旧快照 + 明确的
+   坏消息**（「实时取数失败，先给上一次成功的数据 / 数据已 N 分钟未更新」）。
+   失败计数与连续失败告警逻辑不变。
+3. **告警只走 WS 长连接这一条腿**（P0）
+   WS 挂掉的时刻恰恰最需要「坏了自己出声」。两层修复：
+   - `sendAlert` 返回成功与否；WS 推送失败时按 `alerts.webhooks` 配置回退群机器人
+     webhook（直接解析 JSON 校验 errcode，HTTP 200 包 errcode≠0 的静默失败在
+     线上项目踩过，这里不留）。webhooks 未配置时行为与从前一致。
+   - 陈旧告警改为**推送全部成功才记冷却**。原先「先记冷却再推送」：WS 恰好断开时
+     推送失败，告警要白白等完整个冷却期（默认 180 分钟）才有下一次机会。
+
+**验证**：`--check` / `--stale-selftest` / `--hint-selftest` / `--stale-check` 全绿；
+`--query 余额` 走真实快照端到端 3ms；clipReplyBytes 三用例（超长中文 / 以内不截 / 边界无乱码）通过；
+线上守护进程已经看门狗自愈路径换新，心跳正常。
+
+**兼容性**：不碰脚本契约、不碰配置格式。`alerts.webhooks` 是可选新字段，不配则零变化。
+
+**发版前加固（2026-10-20 · 数据脱敏与打包审计）**
+
+- `scripts/pack.ps1`：排除清单补齐**凭据**（`secret.txt` / `webhooks.json` / `commands.json` /
+  `.access_token.json` / `.env`）与**采集结果**（`snapshots/` / `history/` / `runtime/`）；
+  嵌套文件（如 `assets/webhooks.json`）按文件名递归清理；备份文件 `*.bak*` 一并排除；
+  打包后**逐条目断言**，发现敏感条目就删包并失败 —— 原先会静默打进 zip。
+- `.gitignore`：同步补齐上述文件与目录。仓库要转公开，一次 `git add -A` 就可能把真实 key
+  与业务留档推上去。
+- `assets/webhook_key.py`：改 `utf-8-sig` 读配置。记事本 / PowerShell 5.1 写出的
+  `webhooks.json` 带 BOM，原先直接 `JSONDecodeError`（`fastlane.mjs` 早就剥 BOM，这里漏了）。
+- `assets/_preview_check.py`：占位 `import <模块名>` 改成 `importlib.import_module(...)`，
+  模板不再带语法错误出厂。
+- `assets/fastlane.mjs`：告警 webhook 兜底的 `fetch` 加 8 秒超时 —— 没有超时且对方不回包时，
+  「单飞锁」永不释放，通道会一直回「上一条还在执行」。
+- 清理本机绝对路径与内部项目名（CHANGELOG / 操作手册），并重生成 docx。
+- 新增 `tests/test_release_hygiene.py`（4 条断言：全仓 `.py` 可编译、带 BOM 的配置可读、
+  `pack.ps1` 与 `.gitignore` 的敏感清单覆盖）。
+
 ## v2.3.6 — README 拆成英文默认 + 中文单文件（GitHub 惯例）
 
 由来：v2.3.4 把双语塞进了同一个 `README.md`（392 行，中文在上、英文在下）。

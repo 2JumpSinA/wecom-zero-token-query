@@ -1,6 +1,6 @@
 # 企微「零 Token 数据查询」直调通道 · 技能包
 
-[![tests](https://github.com/2JumpSinA/wecom-zero-token-query/actions/workflows/tests.yml/badge.svg)](https://github.com/2JumpSinA/wecom-zero-token-query/actions/workflows/tests.yml) · **中文** · [English](README.md) · v2.3.6 · [MIT](LICENSE)
+[![tests](https://github.com/2JumpSinA/wecom-zero-token-query/actions/workflows/tests.yml/badge.svg)](https://github.com/2JumpSinA/wecom-zero-token-query/actions/workflows/tests.yml) · **中文** · [English](README.md) · v2.3.7 · [MIT](LICENSE)
 
 把「固定几类数据查询」做成企业微信里的**零 token 直调入口**：
 群里 @机器人 发命令 → 本机脚本直接取数 → 结果回到那条消息。

@@ -44,6 +44,21 @@ const HEARTBEAT_FILE = path.join(LOG_DIR, 'heartbeat.txt');
 const PID_FILE = path.join(LOG_DIR, 'fastlane.pid');
 const LOG_MAX_BYTES = 5 * 1024 * 1024;
 const MAX_REPLY_BYTES = 20000; // SDK 上限 20480 字节，留余量
+
+/**
+ * 按字节数裁剪回复正文。
+ * 为什么不能用 String.slice：slice 按 UTF-16 字符数截，中文每字 3 字节（UTF-8），
+ * 20000 个中文字符最坏 ~60KB，截完仍超 SDK 上限 → 发送失败且只在日志里可见。
+ * 做法是直接在 Buffer 上裁，并回退到完整的 UTF-8 字符边界（避免切出半个字）。
+ */
+function clipReplyBytes(payload, maxBytes = MAX_REPLY_BYTES) {
+  const suffix = '\n> （内容过长已截断，完整明细见本地日志）';
+  const buf = Buffer.from(payload, 'utf8');
+  if (buf.length <= maxBytes) return payload;
+  let cut = maxBytes - Buffer.byteLength(suffix, 'utf8');
+  while (cut > 0 && (buf[cut] & 0xc0) === 0x80) cut--; // 0b10xxxxxx = 多字节字符的后续字节
+  return buf.subarray(0, cut).toString('utf8') + suffix;
+}
 const SEPARATOR_RE = /^\s*={10,}\s*$/;
 const SNAPSHOT_DIR = path.join(HERE, 'snapshots');
 const HISTORY_DIR = path.join(HERE, 'history');
@@ -889,18 +904,55 @@ function authHintFor(text, cfg) {
   return '';
 }
 
-/** 主动推一条提醒（告警用）。dryRun 时只写日志，不打扰群。 */async function sendAlert(client, cfg, chatId, text) {
+/**
+ * 主动推一条提醒（告警用）。dryRun 时只写日志，不打扰群。返回推送是否成功。
+ * P0-3 兜底：WS 推送失败时回退群机器人 webhook —— WS 挂掉的时刻恰恰最需要告警，
+ * 不能让「发现问题」和「报告问题」共用同一条链路。alerts.webhooks 未配置时
+ * 行为与从前一致（只写日志）。webhook 用 HTTP 200 包 errcode 的坑（线上项目
+ * 踩过）在这里直接解析 JSON 校验 errcode，不留静默失败。
+ */
+async function sendAlert(client, cfg, chatId, text) {
   if (cfg.alerts?.dryRun === true) {
     log(`[dryRun] 本该推送告警：${text.replace(/\n/g, ' ｜ ')}`);
-    return;
+    return true;
   }
   try {
     await client.sendMessage(chatId, { msgtype: 'markdown', markdown: { content: text } });
     // 措辞故意中性：这个函数既服务「连续失败告警」也服务「采集陈旧告警」
     log(`已推送告警到 ${chatId}`);
+    return true;
   } catch (e) {
-    log(`告警推送失败：${e?.message ?? e}`);
+    log(`告警推送失败（WS）：${e?.message ?? e}`);
   }
+  const hooks = (cfg.alerts?.webhooks ?? []).map(String).filter((h) => /^https:\/\/qyapi\.weixin\.qq\.com\//.test(h));
+  if (!hooks.length) {
+    log('未配置 alerts.webhooks，本次告警丢失（可在 commands.json 的 alerts.webhooks 里配群机器人 webhook 地址作兜底）');
+    return false;
+  }
+  for (const hook of hooks) {
+    try {
+      const res = await fetch(hook, {
+        method: 'POST',
+        // 必须带超时：本函数在查询主路径里被 await，而「单飞锁」在外层 finally 才释放；
+        // 对方连上不回包时没有超时，整个通道会永远回「上一条还在执行」。
+        signal: AbortSignal.timeout(8000),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          msgtype: 'markdown',
+          markdown: { content: `${text}\n> （WS 通道异常，本条经 webhook 兜底发出）` },
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (res.ok && body.errcode === 0) {
+        log(`已通过 webhook 兜底推送告警（目标 ${chatId}）`);
+        return true;
+      }
+      log(`webhook 兜底仍失败：HTTP ${res.status} errcode=${body.errcode} errmsg=${body.errmsg}`);
+    } catch (e2) {
+      log(`webhook 兜底异常：${e2?.message ?? e2}`);
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------- 陈旧告警
@@ -975,21 +1027,32 @@ async function staleCheck(client, cfg) {
   for (const r of staleReport(cfg)) {
     if (!r.dec.alert) continue;
 
-    // 先记冷却再决定推不推：dryRun 也记，否则演练时每轮都刷一遍日志
-    staleAlerted.set(r.cmd.snapshot, Date.now());
     if (!chats.length) {
+      // 没配推送目标：只记日志。记冷却是为了别每轮都刷一遍日志（维持原行为）。
+      staleAlerted.set(r.cmd.snapshot, Date.now());
       logCollect(`陈旧告警（未配 chats，只记日志）：${r.dec.reason}`);
       continue;
     }
     if (st.dryRun === true) {
+      // dryRun 也记冷却，否则演练时每轮都刷一遍日志
+      staleAlerted.set(r.cmd.snapshot, Date.now());
       logCollect(`[dryRun] 陈旧告警本该推送：${r.dec.reason} → ${chats.join(', ')}`);
       sent += 1;
       continue;
     }
-    // sendAlert 内部还会看 alerts.dryRun（总开关），两层都拦得住
-    for (const chatId of chats) await sendAlert(client, cfg, chatId, r.text);
-    logCollect(`陈旧告警已推送：${r.dec.reason} → ${chats.join(', ')}`);
-    sent += 1;
+    // P0-3：推送**全部成功**才记冷却。原先「先记冷却再推送」：WS 恰好断开时
+    // 推送失败，告警要白白等完整个冷却期（默认 3 小时）才有下一次机会 ——
+    // 而那正是最需要告警的时刻。推送失败就留给下一轮采集重试。
+    // sendAlert 内部还会看 alerts.dryRun（总开关），两层都拦得住。
+    let ok = true;
+    for (const chatId of chats) ok = (await sendAlert(client, cfg, chatId, r.text)) && ok;
+    if (ok) {
+      staleAlerted.set(r.cmd.snapshot, Date.now());
+      logCollect(`陈旧告警已推送：${r.dec.reason} → ${chats.join(', ')}`);
+      sent += 1;
+    } else {
+      logCollect(`陈旧告警推送未全部成功，不记冷却（下轮采集后重试）：${r.dec.reason}`);
+    }
   }
   return sent;
 }
@@ -1189,10 +1252,7 @@ async function serve(cfg, sdk) {
       const t0 = Date.now();
       const body = applyBrandScope(cached.markdown, cmd, cfg, chatId, chattype);
       const payload = [freshnessLine(cached.snap, cmd, cfg), body].filter(Boolean).join('\n\n');
-      const clipped =
-        Buffer.byteLength(payload, 'utf8') > MAX_REPLY_BYTES
-          ? payload.slice(0, MAX_REPLY_BYTES) + '\n> （内容过长已截断，完整明细见本地日志）'
-          : payload;
+      const clipped = clipReplyBytes(payload);
       const renderMs = Date.now() - t0;
       log(`读缓存命中：${cmd.id} 源=${cmd.snapshot} 数据时间=${cached.snap.captured_at}（${humanAge(cached.ageMin)}）渲染=${renderMs}ms 正文=${Buffer.byteLength(clipped, 'utf8')}B`);
       noteSuccess(cmd.id);
@@ -1235,7 +1295,28 @@ async function serve(cfg, sdk) {
         const hint = authHintFor(`${res.err}\n${res.out}`, cfg);
         if (hint) log(`命中失败提示规则：${hint}`);
         const hintLine = hint ? `\n> 💡 ${hint}` : '';
-        await client.replyStream(frame, streamId, `### ❌ ${cmd.label}查询失败\n> 退出码：${res.code}，耗时 ${(res.ms / 1000).toFixed(1)} 秒${hintLine}${detail}`, true);
+        // P0-2 兜底：配了 snapshot 的命令，现场抓取失败时回退**旧快照**（哪怕已超过
+        // maxAgeMinutes）。否则"缓存刚过期 + 平台正好抖动"叠加时，磁盘上明明还有
+        // 旧数据，用户却什么都拿不到。有旧数据就给旧数据 + 明确的坏消息。
+        let replied = false;
+        if (cmd.snapshot) {
+          const oldSnap = readSnapshot(cmd.snapshot);
+          if (oldSnap && String(oldSnap.markdown ?? '').trim()) {
+            const ageMin = snapshotAgeMinutes(oldSnap);
+            const ageText = Number.isFinite(ageMin) ? `${Math.round(ageMin)} 分钟` : '未知';
+            const warn =
+              `### ⚠️ 实时取数失败，先给上一次成功的数据\n` +
+              `> 现场取数退出码 ${res.code}（耗时 ${(res.ms / 1000).toFixed(1)} 秒）${hintLine}\n` +
+              `> 以下数据已 ${ageText} 未更新，仅供参考 —— 采集恢复后查询会自动回到正常路径`;
+            const body = applyBrandScope(oldSnap.markdown, cmd, cfg, chatId, chattype);
+            await client.replyStream(frame, streamId, clipReplyBytes([warn, body].filter(Boolean).join('\n\n')), true);
+            log(`现场抓取失败，已回退旧快照：${cmd.id} 数据时间=${oldSnap.captured_at}（${ageText}）`);
+            replied = true;
+          }
+        }
+        if (!replied) {
+          await client.replyStream(frame, streamId, `### ❌ ${cmd.label}查询失败\n> 退出码：${res.code}，耗时 ${(res.ms / 1000).toFixed(1)} 秒${hintLine}${detail}`, true);
+        }
         lastRuns.set(cmd.id, { ts: Date.now(), ok: false, code: res.code, ms: res.ms });
         const dec = noteFailure(cmd.id, cfg.alerts);
         log(`失败计数：${cmd.id} —— ${dec.alert ? '★ 触发告警' : '不告警'}（${dec.reason}）`);
@@ -1256,10 +1337,7 @@ async function serve(cfg, sdk) {
       }
       noteSuccess(cmd.id);
       lastRuns.set(cmd.id, { ts: Date.now(), ok: true, code: res.code, ms: res.ms });
-      const clipped =
-        Buffer.byteLength(payload, 'utf8') > MAX_REPLY_BYTES
-          ? payload.slice(0, MAX_REPLY_BYTES) + '\n> （内容过长已截断，完整明细见本地日志）'
-          : payload;
+      const clipped = clipReplyBytes(payload);
       await client.replyStream(frame, streamId, clipped, true);
     } catch (e) {
       log(`执行异常：${cmd.id} ${e?.stack ?? e}`);

@@ -3,8 +3,17 @@ logs/
 __pycache__/
 *.pyc
 .session.json
-*.bak
+*.bak*
 _versions/
 node_modules/
 # 真实凭据（只在本机存在）
 secret.txt
+# 部署态数据与凭据（2026-10-20 发版前审计补：漏一项就等于把 key / 业务数据打进公开包）
+webhooks.json
+commands.json
+.access_token.json
+.env
+.env.local
+snapshots/
+history/
+runtime/
