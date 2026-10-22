@@ -3,6 +3,27 @@
 本技能按"取数层 / 通道层 / 部署层"三层组织（见 `references/00-架构总览.md`）。
 版本号在 `VERSION` 文件里；打包用 `scripts/pack.ps1`（会自动排除 logs/、__pycache__、.git 等）。
 
+## v2.3.8 — 部署文档同步本地实战：SDK 正式化与取数层三条教训
+
+由来：本地生产目录完成 SDK 依赖正式化（`package.json` + `package-lock.json` + `.npmrc`，
+`@wecom/aibot-node-sdk@1.0.7` 精确锁定，删除只在 DSH 环境才存在的 fallback 兜底），
+并把同期实战沉淀的三条取数层教训写进方法论。本次 `assets/fastlane.mjs` 与文档同步更新，无契约变化。
+
+1. **`assets/fastlane.mjs` 删除 DSH fallback 死代码**
+   `sdkCandidates()` 里扫 `$DSH_HOME/profiles/*/.dsh-module-fallback` 的分支对开源用户是死路
+   （报错难懂且永远找不到）。SDK 解析只走标准 `node_modules`，找不到时报错直接指向 `npm ci`。
+   部署文档（`09 §3`）同步改为 `npm ci --omit=dev` 标准路径 + lockfile 离线拷贝说明。
+2. **`references/07` 新增三条实战教训**（均为真实故障复盘）：
+   - §3.1.1 cookie 必须按域过滤、注入只投单域 —— 混域致 `431/400 header too large`，
+     且报错文案里的 "header size: NNN" 不是真实上限，别被带偏；
+   - §3.1.2 会话过期 ≠ 立即失败 —— token 续期 → profile 回退 → 告警分两级的三段回退链；
+   - §2 B 类补「票据自举」—— 短周期签名票不随登录态下发，空票首发换新票是标准姿势。
+
+**验证**：`npm ls` 干净无 extraneous；lockfile 30/30 带 integrity；裸 import SDK 成功；
+`DSH_HOME` 指向不存在路径仍能启动（证明无 fallback 依赖）。
+
+**兼容性**：无。通道命令格式、脚本契约、配置结构均不变。
+
 ## v2.3.7 — 三个线上韧性修复：字节截断 / 过期快照兜底 / 告警不依赖单链路
 
 由来：2026-10-20 对线上实例（本机部署目录）做整体审查，

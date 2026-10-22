@@ -1,7 +1,7 @@
 ---
 name: wecom-zero-token-query
 display_name: 企微零 Token 数据查询直调通道
-version: 2.2.0
+version: 2.3.8
 agent_created: true
 description: >-
   把「固定几类数据查询」做成企业微信里的零 token 直调入口：群里 @机器人 发命令 → 本机脚本直接取数 → 结果回到群里，

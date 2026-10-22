@@ -1,6 +1,6 @@
 # WeCom "Zero-Token" Query Lane · a skill package
 
-[![tests](https://github.com/2JumpSinA/wecom-zero-token-query/actions/workflows/tests.yml/badge.svg)](https://github.com/2JumpSinA/wecom-zero-token-query/actions/workflows/tests.yml) · **English** · [中文](README.zh-CN.md) · v2.3.7 · [MIT](LICENSE)
+[![tests](https://github.com/2JumpSinA/wecom-zero-token-query/actions/workflows/tests.yml/badge.svg)](https://github.com/2JumpSinA/wecom-zero-token-query/actions/workflows/tests.yml) · **English** · [中文](README.zh-CN.md) · v2.3.8 · [MIT](LICENSE)
 
 Turn a handful of fixed data lookups into a **zero-token query lane** inside WeCom:
 `@bot <command>` in a group → a local script fetches the data → the result lands in that same message.

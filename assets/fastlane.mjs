@@ -13,7 +13,7 @@
  *
  * 与 dsh-im 的关系：完全独立。
  *   两者各自持有**不同的**智能机器人凭据（botId/secret），互不依赖。
- *   本进程挂掉不影响 @恢恢企微分身；DSH 重启也不影响本进程。
+ *   本进程挂掉不影响 @备用企微分身；DSH 重启也不影响本进程。
  *
  * 用法：
  *   node fastlane.mjs                    常驻，接企微长连接
@@ -145,21 +145,18 @@ function loadSecret(cfg) {
 }
 
 // ---------------------------------------------------------------- SDK
-/** 依次尝试的 SDK 绝对路径（本机没有独立 node_modules 时，借用 DSH 的模块回退目录） */
+/**
+ * 依次尝试的 SDK 绝对路径。
+ * 正常路径是 bare import（依赖记在 package.json 里）；下面这些只是裸 import 失败时的兜底。
+ * 注意：不要再加回 profiles\*\\.dsh-module-fallback —— 那是 DSH 0.1.5 的临时投影目录，
+ * DSH 启动时会自行清理（dsh-app-boot 的 removeLinkProjections），指着它等于把停机风险写进程序。
+ */
 function sdkCandidates() {
   const out = [];
   if (process.env.WECOM_FASTLANE_SDK) out.push(process.env.WECOM_FASTLANE_SDK);
   const rel = path.join('node_modules', '@wecom', 'aibot-node-sdk', 'dist', 'index.esm.js');
   out.push(path.join(HERE, rel));
   out.push(path.join(HERE, '..', rel));
-  const home = process.env.DSH_HOME || path.join(process.env.USERPROFILE || '', 'dsh-home');
-  try {
-    for (const e of readdirSync(path.join(home, 'profiles'), { withFileTypes: true })) {
-      if (e.isDirectory()) out.push(path.join(home, 'profiles', e.name, '.dsh-module-fallback', rel));
-    }
-  } catch {
-    /* 没有 DSH_HOME 就跳过这条路 */
-  }
   return out;
 }
 
@@ -733,7 +730,7 @@ function helpText(cfg, chatId, chattype) {
     .join('\n');
   const head = info?.name ? `### 数据查询机器人 · ${info.name}` : '### 数据查询机器人';
   const brand = info?.brands?.length ? `\n> 本群默认品牌：${info.brands.join(' / ')}` : '';
-  return `${head}${brand}\n> 直接 @我 并发送下面的命令：\n${list}\n> 其它问题请 @恢恢企微分身（那条通道会带上下文，但会消耗额度）`;
+  return `${head}${brand}\n> 直接 @我 并发送下面的命令：\n${list}\n> 其它问题请 @备用企微分身（那条通道会带上下文，但会消耗额度）`;
 }
 
 /** 心跳文件：只有「连接正常」时才写，并带上自己的 PID。
@@ -908,8 +905,8 @@ function authHintFor(text, cfg) {
  * 主动推一条提醒（告警用）。dryRun 时只写日志，不打扰群。返回推送是否成功。
  * P0-3 兜底：WS 推送失败时回退群机器人 webhook —— WS 挂掉的时刻恰恰最需要告警，
  * 不能让「发现问题」和「报告问题」共用同一条链路。alerts.webhooks 未配置时
- * 行为与从前一致（只写日志）。webhook 用 HTTP 200 包 errcode 的坑（线上项目
- * 踩过）在这里直接解析 JSON 校验 errcode，不留静默失败。
+ * 行为与从前一致（只写日志）。webhook 用 HTTP 200 包 errcode 的坑（BalanceAlert
+ * 项目踩过）在这里直接解析 JSON 校验 errcode，不留静默失败。
  */
 async function sendAlert(client, cfg, chatId, text) {
   if (cfg.alerts?.dryRun === true) {
@@ -933,9 +930,6 @@ async function sendAlert(client, cfg, chatId, text) {
     try {
       const res = await fetch(hook, {
         method: 'POST',
-        // 必须带超时：本函数在查询主路径里被 await，而「单飞锁」在外层 finally 才释放；
-        // 对方连上不回包时没有超时，整个通道会永远回「上一条还在执行」。
-        signal: AbortSignal.timeout(8000),
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           msgtype: 'markdown',
